@@ -374,7 +374,8 @@ define U-Boot/generic-rk3588
   BUILD_DEVICES:= \
     radxa_e52c \
     radxa_rock-5b-plus \
-    radxa_rock-5t
+    radxa_rock-5t \
+    rd-box_rk3588
 endef
 
 # RK3588 boards
