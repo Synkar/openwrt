@@ -479,6 +479,16 @@ define Device/radxa_zero-3w
 endef
 TARGET_DEVICES += radxa_zero-3w
 
+define Device/rd-box_rk3588
+  $(Device/rk3588)
+  DEVICE_VENDOR := RD-BOX
+  DEVICE_MODEL := RK3588
+  DEVICE_DTS := rk3588-rd-box
+  UBOOT_DEVICE_NAME := generic-rk3588
+  DEVICE_PACKAGES := kmod-r8169 kmod-brcmfmac
+endef
+TARGET_DEVICES += rd-box_rk3588
+
 define Device/sinovoip_bpi-r2-pro
   $(Device/rk3568)
   DEVICE_VENDOR := Sinovoip
