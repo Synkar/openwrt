@@ -326,3 +326,19 @@ define KernelPackage/can-xilinx-can/description
 endef
 
 $(eval $(call KernelPackage,can-xilinx-can))
+
+
+define KernelPackage/can-rockchip-canfd
+  TITLE:=Rockchip CAN-FD controller
+  KCONFIG:=CONFIG_CAN_ROCKCHIP_CANFD
+  FILES:=$(LINUX_DIR)/drivers/net/can/rockchip/rockchip_canfd.ko
+  AUTOLOAD:=$(call AutoProbe,rockchip_canfd)
+  $(call AddDepends/can,@TARGET_rockchip)
+endef
+
+define KernelPackage/can-rockchip-canfd/description
+ Rockchip CAN-FD controller driver (rockchip_canfd). Matches the
+ rk3568v2/rk3568v3/rk3588 CAN IP via DT compatible "rockchip,rk3568v2-canfd".
+endef
+
+$(eval $(call KernelPackage,can-rockchip-canfd))
