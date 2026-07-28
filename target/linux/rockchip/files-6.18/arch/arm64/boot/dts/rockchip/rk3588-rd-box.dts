@@ -17,10 +17,11 @@
  *
  * TODO Fase 4 (validação em hardware):
  *   - polaridades dos GPIOs de power/reset (usb-host, otg, hub, 4g)
- *   - chip BT exato do módulo ap6275p e compatible brcm
- *   - nós CAN0/CAN1 (driver rockchip_canfd existe mas nós DT não foram
- *     upstreamados no rk3588.dtsi -> adicionar reg/interrupts/clocks)
- *   - firmware WiFi BCM4375 (pacote custom)
+ *   - load do firmware BT BCM4362A2.hcd (compatible brcm,bcm4362a2)
+ *   - CAN0/CAN1: bind do rockchip_canfd (compatible rockchip,rk3568v2-canfd,
+ *     sem equivalente rk3588 no driver mainline) + mux de pino m0/m1
+ *   - firmware WiFi BCM4375/BCM43752 (pacote ap6275p-firmware)
+ *   - gmac1 timing (rgmii-rxid / clock_in_out / tx_delay) link real
  */
 
 /dts-v1/;
@@ -41,8 +42,10 @@
 		mmc1 = &sdmmc;
 	};
 
+	/* Console: uart2 @ 1500000 (padrao rockchip / mainline U-Boot generic-rk3588;
+	 * o default.bootscript do target tambem forca console=ttyS2,1500000). */
 	chosen {
-		stdout-path = "serial2:115200n8";
+		stdout-path = "serial2:1500000n8";
 	};
 
 	vcc12v_dcin: regulator-vcc12v-dcin {
@@ -240,6 +243,47 @@
 		pinctrl-0 = <&modem4g_en>;
 		startup-delay-us = <10000>;
 		vin-supply = <&vcc_3v3_s3>;
+	};
+
+	/*
+	 * CAN0/CAN1: o IP CAN do rk3588 equivale ao rk3568v2. Os nos can0/can1
+	 * NAO existem no rk3588-base.dtsi mainline (apenas o pinctrl can0m0/can1m0
+	 * existe em rk3588-base-pinctrl.dtsi), entao definimos os nos completos
+	 * aqui. Driver: rockchip_canfd (CONFIG_CAN_ROCKCHIP_CANFD) -> compatible
+	 * "rockchip,rk3568v2-canfd" (o driver mainline nao tem compatible rk3588;
+	 * o vendor usava "rockchip,can-2.0" no BSP 6.1 fora-de-arvore).
+	 * TODO Fase 4 (HW): validar bind do driver + comunicacao CAN; confirmar se
+	 * o IP rk3588 casa com rk3568v2 (classic) ou rk3568v3 (CANFD); validar os
+	 * transceivers e o mux de pino m0 vs m1 no esquemático.
+	 */
+	can0: can@fea50000 {
+		compatible = "rockchip,rk3568v2-canfd";
+		reg = <0x0 0xfea50000 0x0 0x1000>;
+		interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru CLK_CAN0>, <&cru PCLK_CAN0>;
+		clock-names = "baudclk", "apb_pclk";
+		resets = <&cru SRST_CAN0>, <&cru SRST_P_CAN0>;
+		reset-names = "can", "can-apb";
+		assigned-clocks = <&cru CLK_CAN0>;
+		assigned-clock-rates = <200000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&can0m0_pins>;
+		status = "okay";
+	};
+
+	can1: can@fea60000 {
+		compatible = "rockchip,rk3568v2-canfd";
+		reg = <0x0 0xfea60000 0x0 0x1000>;
+		interrupts = <GIC_SPI 342 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru CLK_CAN1>, <&cru PCLK_CAN1>;
+		clock-names = "baudclk", "apb_pclk";
+		resets = <&cru SRST_CAN1>, <&cru SRST_P_CAN1>;
+		reset-names = "can", "can-apb";
+		assigned-clocks = <&cru CLK_CAN1>;
+		assigned-clock-rates = <200000000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&can1m0_pins>;
+		status = "okay";
 	};
 };
 
@@ -794,14 +838,18 @@
 	status = "okay";
 };
 
-/* uart9: barramento BT do módulo ap6275p. TODO Fase 4: validar compatible/chip. */
+/* uart9: barramento BT do modulo ap6275p. O BT do ap6275p e o chip BCM4362A2
+ * (firmware BCM4362A2.hcd no SDK vendor em AP6275_PCIE/bt). GPIOs conforme o
+ * vendor rp-wifi-bt-pcie-ap6275p.dtsi:
+ *   reset/BT,reset_gpio = gpio0 PA0, wake = gpio2 PB3, wake_host_irq = gpio2 PB0.
+ * TODO Fase 4 (HW): validar load do firmware BCM4362A2.hcd e o HCI attach. */
 &uart9 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart9m0_xfer &uart9m0_ctsn>;
 	status = "okay";
 
 	bluetooth {
-		compatible = "brcm,bcm4345c5";
+		compatible = "brcm,bcm4362a2";
 		shutdown-gpios = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
 		device-wakeup-gpios = <&gpio2 RK_PB3 GPIO_ACTIVE_HIGH>;
 		host-wakeup-gpios = <&gpio2 RK_PB0 GPIO_ACTIVE_HIGH>;
