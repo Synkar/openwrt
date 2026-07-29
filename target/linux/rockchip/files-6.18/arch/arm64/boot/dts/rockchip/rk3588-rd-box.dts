@@ -30,6 +30,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/rockchip.h>
+#include <dt-bindings/soc/rockchip,vop2.h>
 
 #include "rk3588.dtsi"
 
@@ -348,6 +349,68 @@
 		reset-gpios = <&gpio3 RK_PB7 GPIO_ACTIVE_LOW>;
 		reset-assert-us = <20000>;
 		reset-deassert-us = <100000>;
+	};
+};
+
+/* ===== HDMI0 (display + audio) ============================================
+ * Portado de rk3588-evb1-v10.dts (bindings mainline). Diferenças vs SDK vendor:
+ * o label do PHY é &hdptxphy0 (não &hdptxphy_hdmi0) e o &route_hdmi0
+ * (vendor-specific) foi removido — mainline descreve o pipeline via grafo OF.
+ * O dw-hdmi-qp pega o PHY por phandle (phys = <&hdptxphy0>) na base dtsi.
+ */
+&vop {
+	status = "okay";
+};
+
+&vop_mmu {
+	status = "okay";
+};
+
+&hdmi0 {
+	status = "okay";
+};
+
+&hdmi0_in {
+	hdmi0_in_vp0: endpoint {
+		remote-endpoint = <&vp0_out_hdmi0>;
+	};
+};
+
+&hdmi0_out {
+	hdmi0_out_con: endpoint {
+		remote-endpoint = <&hdmi0_con_in>;
+	};
+};
+
+&vp0 {
+	vp0_out_hdmi0: endpoint@ROCKCHIP_VOP2_EP_HDMI0 {
+		remote-endpoint = <&hdmi0_in_vp0>;
+	};
+};
+
+&hdptxphy0 {
+	status = "okay";
+};
+
+/* HDMI audio: simple-audio-card (cpu = i2s5_8ch -> codec = hdmi0).
+ * O nó hdmi0_sound já vem pré-wired na rk3588-base.dtsi; basta habilitar. */
+&i2s5_8ch {
+	status = "okay";
+};
+
+&hdmi0_sound {
+	status = "okay";
+};
+
+/ {
+	hdmi0-con {
+		compatible = "hdmi-connector";
+		type = "a";	/* Type A: full-size HDMI */
+		port {
+			hdmi0_con_in: endpoint {
+				remote-endpoint = <&hdmi0_out_con>;
+			};
+		};
 	};
 };
 
