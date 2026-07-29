@@ -42,10 +42,12 @@
 		mmc1 = &sdmmc;
 	};
 
-	/* Console: uart2 @ 1500000 (padrao rockchip / mainline U-Boot generic-rk3588;
-	 * o default.bootscript do target tambem forca console=ttyS2,1500000). */
+	/* Console: uart2 @ 115200 (baixa para compatibilidade com adaptadores
+	 * USB-serial CP2102, que nao suportam 1.5 Mbaud; bate com o debug do
+	 * hardware vendor em fiq_debugger serial-id=2 @ 115200). U-Boot rd-box-rk3588
+	 * tambem e construido com CONFIG_BAUDRATE=115200 (UBOOT_CUSTOMIZE_CONFIG). */
 	chosen {
-		stdout-path = "serial2:1500000n8";
+		stdout-path = "serial2:115200n8";
 	};
 
 	vcc12v_dcin: regulator-vcc12v-dcin {

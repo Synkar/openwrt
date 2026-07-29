@@ -374,8 +374,15 @@ define U-Boot/generic-rk3588
   BUILD_DEVICES:= \
     radxa_e52c \
     radxa_rock-5b-plus \
-    radxa_rock-5t \
-    rd-box_rk3588
+    radxa_rock-5t
+endef
+
+define U-Boot/rd-box-rk3588
+  $(U-Boot/rk358x/Default)
+  NAME:=RD-BOX RK3588
+  UBOOT_CONFIG:=generic-rk3588
+  UBOOT_CUSTOMIZE_CONFIG += --set-val BAUDRATE 115200
+  BUILD_DEVICES:=rd-box_rk3588
 endef
 
 # RK3588 boards
@@ -478,6 +485,7 @@ UBOOT_TARGETS := \
   nanopi-m5-rk3576 \
   rock-4d-rk3576 \
   generic-rk3588 \
+  rd-box-rk3588 \
   nanopc-t6-rk3588 \
   rock-5-itx-rk3588 \
   rock5b-rk3588 \
