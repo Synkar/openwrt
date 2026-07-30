@@ -255,13 +255,16 @@
 	 * aqui. Driver: rockchip_canfd (CONFIG_CAN_ROCKCHIP_CANFD) -> compatible
 	 * "rockchip,rk3568v2-canfd" (o driver mainline nao tem compatible rk3588;
 	 * o vendor usava "rockchip,can-2.0" no BSP 6.1 fora-de-arvore).
-	 * TODO Fase 4 (HW): validar bind do driver + comunicacao CAN; confirmar se
-	 * o IP rk3588 casa com rk3568v2 (classic) ou rk3568v3 (CANFD); validar os
-	 * transceivers e o mux de pino m0 vs m1 no esquemático.
+	 *
+	 * CAN1 fica DESABILITADO: can1m0 (gpio3 RK_PB5 = can1_rx_m0) é o MESMO
+	 * pino que gmac1_txen (eth0 RGMII), essencial para a ethernet primaria.
+	 * O vendor tampouco habilita can1 neste board. Se um 2o CAN existir no
+	 * hardware, precisara do mux can1m1 + validacao do esquemático.
 	 */
 	can0: can@fea50000 {
 		compatible = "rockchip,rk3568v2-canfd";
 		reg = <0x0 0xfea50000 0x0 0x1000>;
+		interrupt-parent = <&gic>;
 		interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&cru CLK_CAN0>, <&cru PCLK_CAN0>;
 		clock-names = "baudclk", "apb_pclk";
@@ -277,6 +280,7 @@
 	can1: can@fea60000 {
 		compatible = "rockchip,rk3568v2-canfd";
 		reg = <0x0 0xfea60000 0x0 0x1000>;
+		interrupt-parent = <&gic>;
 		interrupts = <GIC_SPI 342 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&cru CLK_CAN1>, <&cru PCLK_CAN1>;
 		clock-names = "baudclk", "apb_pclk";
@@ -286,7 +290,8 @@
 		assigned-clock-rates = <200000000>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&can1m0_pins>;
-		status = "okay";
+		/* can1m0 conflita com gmac1_txen (gpio3 RK_PB5); ver comentario acima. */
+		status = "disabled";
 	};
 };
 
@@ -323,7 +328,12 @@
 };
 
 /* Ethernet primario: gmac1 RGMII (rp-eth-gmac1.dtsi). Timing preservado do vendor
- * (rgmii-rxid, clock input, tx_delay). Reset modernizado p/ o no phy (mainline). */
+ * (rgmii-rxid, clock input, tx_delay). Reset modernizado p/ o no phy (mainline).
+ *
+ * O grupo eth1_pins (eth1_refclko_25m, gpio3 PA6) é INDISPENSÁVEL: ele roteia o
+ * clock de 25MHz gerado pelo CRU (REFCLKO25M_ETH1_OUT) ate o pino XTAL do PHY
+ * RTL8211F. Sem ele o PHY fica sem clock e nao responde no MDIO, gerando
+ * "cannot attach to PHY (-ENODEV)". O vendor chama esse grupo de "eth1_pins". */
 &gmac1 {
 	phy-mode = "rgmii-rxid";
 	clock_in_out = "input";
@@ -335,18 +345,26 @@
 		     &gmac1_rx_bus2
 		     &gmac1_rgmii_clk
 		     &gmac1_rgmii_bus
-		     &gmac1_clkinout>;
+		     &gmac1_clkinout
+		     &eth1_pins>;
 
 	phy-handle = <&rgmii_phy1>;
 	status = "okay";
 };
 
 &mdio1 {
-	/* RTL8211F (vendor: reset gpio3 PB7, 20ms assert / 100ms deassert;
-	 * refclk 25MHz sai do CRU pela gmac1_clkinout -> sem ele o PHY nao responde
-	 * no MDIO, gerando "cannot attach to PHY (-ENODEV)"). */
+	/* RTL8211F (vendor: reset gpio3 PB7, 20ms assert / 100ms deassert).
+	 * O refclk 25MHz do PHY vem do CRU (REFCLKO25M_ETH1_OUT) roteado ao pino
+	 * XTAL do PHY pelo grupo eth1_pins/eth1_refclko_25m (gpio3 PA6) do &gmac1.
+	 *
+	 * compatible "ethernet-phy-id001c.c916" (PHY-ID do RTL8211F): faz a phylib
+	 * criar o device SEM uma leitura MDIO prematura. Com o generico
+	 * "ethernet-phy-ieee802.3-c22" a phylib tenta ler o ID ANTES de aplicar o
+	 * reset-gpios; como o PHY esta em reset, a leitura falha (-ENODEV) e o device
+	 * nunca é criado (o reset-gpios fica "UNCLAIMED"). Mesmo padrao do
+	 * rk3588-evb1-v10.dts para o mesmo PHY RTL8211F. */
 	rgmii_phy1: ethernet-phy@1 {
-		compatible = "ethernet-phy-ieee802.3-c22";
+		compatible = "ethernet-phy-id001c.c916";
 		reg = <0x1>;
 		clocks = <&cru REFCLKO25M_ETH1_OUT>;
 		reset-gpios = <&gpio3 RK_PB7 GPIO_ACTIVE_LOW>;
@@ -1036,6 +1054,9 @@
 };
 
 &pinctrl {
+	/* O grupo eth1_pins (eth1_refclko_25m, gpio3 PA6) já é definido pelo
+	 * rk3588-base-pinctrl.dtsi; basta referenciá-lo em &gmac1 pinctrl-0. */
+
 	leds {
 		led_sys: led-sys {
 			rockchip,pins = <4 RK_PA6 RK_FUNC_GPIO &pcfg_pull_none>;
