@@ -342,10 +342,13 @@
 };
 
 &mdio1 {
-	/* RTL8211F (vendor: reset gpio3 PB7, 20ms assert / 100ms deassert) */
+	/* RTL8211F (vendor: reset gpio3 PB7, 20ms assert / 100ms deassert;
+	 * refclk 25MHz sai do CRU pela gmac1_clkinout -> sem ele o PHY nao responde
+	 * no MDIO, gerando "cannot attach to PHY (-ENODEV)"). */
 	rgmii_phy1: ethernet-phy@1 {
 		compatible = "ethernet-phy-ieee802.3-c22";
 		reg = <0x1>;
+		clocks = <&cru REFCLKO25M_ETH1_OUT>;
 		reset-gpios = <&gpio3 RK_PB7 GPIO_ACTIVE_LOW>;
 		reset-assert-us = <20000>;
 		reset-deassert-us = <100000>;
@@ -384,6 +387,7 @@
 
 &vp0 {
 	vp0_out_hdmi0: endpoint@ROCKCHIP_VOP2_EP_HDMI0 {
+		reg = <ROCKCHIP_VOP2_EP_HDMI0>;
 		remote-endpoint = <&hdmi0_in_vp0>;
 	};
 };
