@@ -449,11 +449,34 @@
 	status = "okay";
 };
 
-/* pcie2x1l0: WiFi ap6275p (rp-wifi-bt-pcie-ap6275p) */
+/* pcie2x1l0: WiFi ap6275p (rp-wifi-bt-pcie-ap6275p)
+ * O BCM43752 (AP6275P) precisa do clock LPO de 32.768kHz para o FW inicializar
+ * (sem ele o ARM eh solto mas o FW nunca escreve a sharedram sentinel -> "FW
+ * failed to initialize"). Mainline brcmfmac adquire esse clock via DT, no nó do
+ * dispositivo PCI, pelo nome "lpo" (brcmf_of_probe -> devm_clk_get...("lpo")).
+ * Mesmo binding do armsom-sige7 (AP6275P + RK3588 + hym8563, WiFi funcional).
+ * BDF observado: root port 0002:20:00.0 (bus 0x20), wifi 0002:21:00.0 (bus 0x21).
+ */
 &pcie2x1l0 {
 	reset-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_HIGH>;
 	vpcie3v3-supply = <&vcc3v3_pcie_wifi>;
 	status = "okay";
+
+	pcie@0,0 {
+		reg = <0x200000 0 0 0 0>;
+		#address-cells = <3>;
+		#size-cells = <2>;
+		ranges;
+		device_type = "pci";
+		bus-range = <0x20 0x2f>;
+
+		wifi: wifi@0,0 {
+			compatible = "pci14e4,449d";
+			reg = <0x210000 0 0 0 0>;
+			clocks = <&hym8563>;
+			clock-names = "lpo";
+		};
+	};
 };
 
 /* pcie2x1l1: slot M.2 (rp-pcie2x1l1-m2) */
