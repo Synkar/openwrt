@@ -18,10 +18,10 @@
  * TODO Fase 4 (validação em hardware):
  *   - polaridades dos GPIOs de power/reset (usb-host, otg, hub, 4g)
  *   - load do firmware BT BCM4362A2.hcd (compatible brcm,bcm4362a2)
- *   - CAN0/CAN1: bind do rockchip_canfd (compatible rockchip,rk3568v2-canfd,
- *     sem equivalente rk3588 no driver mainline) + mux de pino m0/m1
  *   - firmware WiFi BCM4375/BCM43752 (pacote ap6275p-firmware)
  *   - gmac1 timing (rgmii-rxid / clock_in_out / tx_delay) link real
+ *
+ * Resolvido: CAN0 (rockchip_canfd bind + can0 UP 500kbps; ver no can0).
  */
 
 /dts-v1/;
@@ -256,6 +256,12 @@
 	 * "rockchip,rk3568v2-canfd" (o driver mainline nao tem compatible rk3588;
 	 * o vendor usava "rockchip,can-2.0" no BSP 6.1 fora-de-arvore).
 	 *
+	 * interrupts: a GICv3 do rk3588 mainline é 4-cell (#interrupt-cells=<4>
+	 * em rk3588-base.dtsi), herdado da raiz. O 4o campo é o partition/PPI-mask
+	 * (0 para SPI). NAO usar a forma 3-cell do vendor (GIC 3-cell) senao o
+	 * parser de DT falha e platform_get_irq() devolve -ENXIO ("IRQ index 0
+	 * not found") — bug historico do bring-up da CAN0.
+	 *
 	 * CAN1 fica DESABILITADO: can1m0 (gpio3 RK_PB5 = can1_rx_m0) é o MESMO
 	 * pino que gmac1_txen (eth0 RGMII), essencial para a ethernet primaria.
 	 * O vendor tampouco habilita can1 neste board. Se um 2o CAN existir no
@@ -264,8 +270,7 @@
 	can0: can@fea50000 {
 		compatible = "rockchip,rk3568v2-canfd";
 		reg = <0x0 0xfea50000 0x0 0x1000>;
-		interrupt-parent = <&gic>;
-		interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH>;
+		interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH 0>;
 		clocks = <&cru CLK_CAN0>, <&cru PCLK_CAN0>;
 		clock-names = "baudclk", "apb_pclk";
 		resets = <&cru SRST_CAN0>, <&cru SRST_P_CAN0>;
@@ -280,8 +285,7 @@
 	can1: can@fea60000 {
 		compatible = "rockchip,rk3568v2-canfd";
 		reg = <0x0 0xfea60000 0x0 0x1000>;
-		interrupt-parent = <&gic>;
-		interrupts = <GIC_SPI 342 IRQ_TYPE_LEVEL_HIGH>;
+		interrupts = <GIC_SPI 342 IRQ_TYPE_LEVEL_HIGH 0>;
 		clocks = <&cru CLK_CAN1>, <&cru PCLK_CAN1>;
 		clock-names = "baudclk", "apb_pclk";
 		resets = <&cru SRST_CAN1>, <&cru SRST_P_CAN1>;
