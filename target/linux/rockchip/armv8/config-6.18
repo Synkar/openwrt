@@ -122,6 +122,13 @@ CONFIG_BSD_PROCESS_ACCT=y
 CONFIG_BSD_PROCESS_ACCT_V3=y
 CONFIG_BUFFER_HEAD=y
 CONFIG_BUILTIN_RETURN_ADDRESS_STRIPS_PAC=y
+# Compila o protocolo Broadcom (hci_bcm.o) dentro de hci_uart.ko para o BT
+# BCM4362A2 do modulo ap6275p no uart9. O kmod-hci-uart (DEVICE_PACKAGES do
+# rd-box) habilita CONFIG_BT_HCIUART mas forca CONFIG_BT_HCIUART_BCM=n; este
+# "=y" no config do target prevalece no merge do OpenWRT (kconfig.pl m+
+# protege valores 'y' do target contra o override dos packages) e habilita o
+# driver que faz probe do nó bluetooth do &uart9.
+CONFIG_BT_HCIUART_BCM=y
 CONFIG_CC_HAVE_SHADOW_CALL_STACK=y
 CONFIG_CC_HAVE_STACKPROTECTOR_SYSREG=y
 CONFIG_CHARGER_GPIO=y

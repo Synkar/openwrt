@@ -485,7 +485,7 @@ define Device/rd-box_rk3588
   DEVICE_MODEL := RK3588
   DEVICE_DTS := rk3588-rd-box
   UBOOT_DEVICE_NAME := rd-box-rk3588
-  DEVICE_PACKAGES := kmod-r8169 kmod-brcmfmac ap6275p-firmware kmod-can-rockchip-canfd
+  DEVICE_PACKAGES := kmod-r8169 kmod-brcmfmac ap6275p-firmware kmod-can-rockchip-canfd kmod-hci-uart
 endef
 TARGET_DEVICES += rd-box_rk3588
 

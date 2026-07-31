@@ -17,9 +17,11 @@
  *
  * TODO Fase 4 (validação em hardware):
  *   - polaridades dos GPIOs de power/reset (usb-host, otg, hub, 4g)
- *   - load do firmware BT BCM4362A2.hcd (compatible brcm,bcm4362a2)
- *   - firmware WiFi BCM4375/BCM43752 (pacote ap6275p-firmware)
- *   - gmac1 timing (rgmii-rxid / clock_in_out / tx_delay) link real
+ *   - bring-up BT: hci_bcm probe + load do FW BCM4362A2.hcd + HCI up
+ *     (binding corrigido: compatible brcm,bcm43438-bt + clock lpo do hym8563 +
+ *      CONFIG_BT_HCIUART_BCM; falta validar em HW)
+ *   - bring-up WAN real do synkar-netrole (uplink DHCP + masquerade)
+ *   - audio HDMI (hdmi0_sound: deferred probe do asoc-simple-card)
  *
  * Resolvido: CAN0 (rockchip_canfd bind + can0 UP 500kbps; ver no can0).
  */
@@ -952,22 +954,51 @@
 	status = "okay";
 };
 
-/* uart9: barramento BT do modulo ap6275p. O BT do ap6275p e o chip BCM4362A2
- * (firmware BCM4362A2.hcd no SDK vendor em AP6275_PCIE/bt). GPIOs conforme o
- * vendor rp-wifi-bt-pcie-ap6275p.dtsi:
- *   reset/BT,reset_gpio = gpio0 PA0, wake = gpio2 PB3, wake_host_irq = gpio2 PB0.
- * TODO Fase 4 (HW): validar load do firmware BCM4362A2.hcd e o HCI attach. */
+/* uart9: barramento BT do modulo ap6275p (chip BCM4362A2). Portado do vendor
+ * rp-wifi-bt-pcie-ap6275p.dtsi (bluetooth-platdata) para bindings mainline do
+ * hci_bcm, seguindo o rk3588-armsom-sige7 (mesmo AP6275P + hym8563). GPIOs
+ * conforme o vendor: reset/BT_REG_ON = gpio0 PA0, wake/BT_WAKE = gpio2 PB3,
+ * host-wakeup/HOST_WAKE = gpio2 PB0.
+ *
+ * compatible: o hci_bcm mainline NAO tem entry para o BCM4362A2 na sua tabela
+ * of_match — "brcm,bcm4362a2" (usado antes deste commit) nunca fazia probe do
+ * driver. Usamos "brcm,bcm43438-bt", mesma estrategia do armsom-sige7 com o
+ * MESMO chip: o driver trata todos os chips Broadcom UART (H4 + set_baud +
+ * load FW) da mesma forma e carrega o BCM4362A2.hcd via request_firmware.
+ *
+ * Clock LPO 32.768kHz do RTC hym8563: o hci_bcm o adquire por
+ * devm_clk_get_optional(dev,"lpo") (brcm,bluetooth.yaml). Sem ele o FW do
+ * BCM4362A2 nao inicializa (mesma dependencia do brcmfmac no lado WiFi).
+ *
+ * host-wakeup: declarado como interrupcao dedicada (interrupts +
+ * interrupt-names="host-wakeup"), em vez do "host-wakeup-gpios" deprecated no
+ * binding (brcm,bluetooth.yaml); mesmo padrao do armsom-sige7.
+ *
+ * RTS/CTS: muxados como funcao UART (func 10), NAO como GPIO. O mainline
+ * hci_bcm controla o flow-control via o MCR do 8250 (hci_uart_set_flow_control
+ * em bcm_suspend/resume_device), ao inves do "RTS-gpio switching" do vendor
+ * platdata (comutacao de pinctrl entre default e rts_gpio). Os grupos
+ * uart9m0_ctsn/uart9m0_rtsn NAO existem no rk3588-base-pinctrl.dtsi mainline
+ * (apenas as variantes m1/m2), entao sao definidos no &pinctrl deste board. */
 &uart9 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&uart9m0_xfer &uart9m0_ctsn>;
+	pinctrl-0 = <&uart9m0_xfer &uart9m0_ctsn &uart9m0_rtsn>;
 	status = "okay";
 
 	bluetooth {
-		compatible = "brcm,bcm4362a2";
+		compatible = "brcm,bcm43438-bt";
+		clocks = <&hym8563>;
+		clock-names = "lpo";
+		interrupt-parent = <&gpio2>;
+		interrupts = <RK_PB0 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "host-wakeup";
 		shutdown-gpios = <&gpio0 RK_PA0 GPIO_ACTIVE_HIGH>;
 		device-wakeup-gpios = <&gpio2 RK_PB3 GPIO_ACTIVE_HIGH>;
-		host-wakeup-gpios = <&gpio2 RK_PB0 GPIO_ACTIVE_HIGH>;
 		max-speed = <1500000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&bt_reset &bt_wake &bt_wake_host_irq>;
+		vbat-supply = <&vcc_3v3_s3>;
+		vddio-supply = <&vcc_1v8_s3>;
 	};
 };
 
@@ -1083,6 +1114,36 @@
 &pinctrl {
 	/* O grupo eth1_pins (eth1_refclko_25m, gpio3 PA6) já é definido pelo
 	 * rk3588-base-pinctrl.dtsi; basta referenciá-lo em &gmac1 pinctrl-0. */
+
+	/* uart9 RTS/CTS em modo m0 (gpio4 PC4=RTS, gpio4 PC5=CTS). Esses grupos
+	 * NAO existem no rk3588-base-pinctrl.dtsi mainline (apenas m1/m2), entao
+	 * sao definidos aqui com o mesmo mapeamento do pinctrl vendor
+	 * (rk3588-vccio3-pinctrl.dtsi). Pinconf pcfg_pull_none, conforme o vendor. */
+	uart9 {
+		uart9m0_ctsn: uart9m0-ctsn {
+			rockchip,pins = <4 RK_PC5 10 &pcfg_pull_none>;
+		};
+
+		uart9m0_rtsn: uart9m0-rtsn {
+			rockchip,pins = <4 RK_PC4 10 &pcfg_pull_none>;
+		};
+	};
+
+	/* GPIOs do BT do ap6275p (pinconf conforme o vendor rp-wifi-bt-pcie-
+	 * ap6275p.dtsi, grupo bt_gpio). */
+	wireless-bluetooth {
+		bt_reset: bt-reset {
+			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		bt_wake: bt-wake {
+			rockchip,pins = <2 RK_PB3 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		bt_wake_host_irq: bt-wake-host-irq {
+			rockchip,pins = <2 RK_PB0 RK_FUNC_GPIO &pcfg_pull_down>;
+		};
+	};
 
 	leds {
 		led_sys: led-sys {
