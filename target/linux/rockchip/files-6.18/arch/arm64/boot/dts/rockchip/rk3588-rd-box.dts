@@ -200,6 +200,8 @@
 	vcc3v3_m2: regulator-vcc3v3-m2 {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc3v3_m2";
+		regulator-always-on;
+		regulator-boot-on;
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		enable-active-high;
@@ -240,6 +242,8 @@
 	vcc3v3_4g: regulator-vcc3v3-4g {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc3v3_4g";
+		regulator-always-on;
+		regulator-boot-on;
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		enable-active-high;
