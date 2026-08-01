@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* Copyright 2024-2025 Tomeu Vizoso <tomeu@tomeuvizoso.net> */
+
+#include <drm/drm_accel.h>
+#include <drm/drm_drv.h>
+#include <drm/drm_gem.h>
+#include <drm/drm_ioctl.h>
+#include <drm/rocket_accel.h>
+#include "rknpu_ioctl.h"
+#include "rkopnu.h"
+#include <linux/clk.h>
+#include <linux/err.h>
+#include <linux/iommu.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+
+#include "rocket_device.h"
+#include "rocket_drv.h"
+#include "rocket_gem.h"
+#include "rocket_job.h"
+
+/*
+ * Facade device, used to expose a single DRM device to userspace, that
+ * schedules jobs to any RKNN cores in the system.
+ */
+static struct platform_device *drm_dev;
+static struct rocket_device *rdev;
+
+static void
+rocket_iommu_domain_destroy(struct kref *kref)
+{
+	struct rocket_iommu_domain *domain = container_of(kref, struct rocket_iommu_domain, kref);
+
+	iommu_domain_free(domain->domain);
+	domain->domain = NULL;
+	kfree(domain);
+}
+
+static struct rocket_iommu_domain*
+rocket_iommu_domain_create(struct device *dev)
+{
+	struct rocket_iommu_domain *domain = kmalloc_obj(*domain);
+	void *err;
+
+	if (!domain)
+		return ERR_PTR(-ENOMEM);
+
+	domain->domain = iommu_paging_domain_alloc(dev);
+	if (IS_ERR(domain->domain)) {
+		err = ERR_CAST(domain->domain);
+		kfree(domain);
+		return err;
+	}
+	kref_init(&domain->kref);
+
+	return domain;
+}
+
+/*
+ * rkopnu multi-domain: get-or-create the domain for domain_id in this fd's
+ * pool. Out-of-range or negative ids (old callers, or a malformed vendor
+ * struct) fall back to domain 0 rather than erroring -- domain 0 always
+ * exists once anything has been allocated, matching the pre-multi-domain
+ * behaviour for callers that never think about domain ids at all.
+ *
+ * iommu_paging_domain_alloc() can sleep, so the allocation itself happens
+ * outside domains_lock; the lock only guards the pool array's slot
+ * install/lookup. That opens a create-create race between two threads
+ * requesting the same not-yet-existing domain id concurrently, handled by
+ * re-checking the slot after allocating and discarding the loser's spare
+ * domain via rocket_iommu_domain_put() (kref drops straight to 0, since
+ * nothing else has seen it yet).
+ */
+struct rocket_iommu_domain *
+rocket_iommu_domain_get(struct rocket_file_priv *rocket_priv, s32 domain_id)
+{
+	struct rocket_iommu_domain *domain, *candidate;
+	u64 start, end;
+
+	if (domain_id < 0 || domain_id >= ROCKET_MAX_IOMMU_DOMAINS)
+		domain_id = 0;
+
+	mutex_lock(&rocket_priv->domains_lock);
+	domain = rocket_priv->domains[domain_id];
+	if (domain)
+		kref_get(&domain->kref);
+	mutex_unlock(&rocket_priv->domains_lock);
+	if (domain)
+		return domain;
+
+	candidate = rocket_iommu_domain_create(rocket_priv->rdev->cores[0].dev);
+	if (IS_ERR(candidate))
+		return candidate;
+
+	candidate->id = domain_id;
+	start = candidate->domain->geometry.aperture_start;
+	end = candidate->domain->geometry.aperture_end;
+	drm_mm_init(&candidate->mm, start, end - start + 1);
+	mutex_init(&candidate->mm_lock);
+
+	mutex_lock(&rocket_priv->domains_lock);
+	domain = rocket_priv->domains[domain_id];
+	if (domain) {
+		/* Lost the race: another thread installed this id first. */
+		kref_get(&domain->kref);
+		mutex_unlock(&rocket_priv->domains_lock);
+		rocket_iommu_domain_put(candidate);
+		return domain;
+	}
+
+	rocket_priv->domains[domain_id] = candidate;
+	/* Caller's reference, on top of the pool's own (kref=1 from create,
+	 * dropped by rocket_iommu_domains_close() at postclose). */
+	kref_get(&candidate->kref);
+	mutex_unlock(&rocket_priv->domains_lock);
+
+	return candidate;
+}
+
+void
+rocket_iommu_domain_put(struct rocket_iommu_domain *domain)
+{
+	/* NULL-tolerant like dma_fence_put()/kfree() elsewhere in this driver:
+	 * rocket_job_cleanup() unconditionally puts job->domain, which is NULL
+	 * on a job that failed before rocket_iommu_domain_get() ever ran
+	 * (e.g. drm_sched_job_init() failure) or that failed the get() itself. */
+	if (!domain)
+		return;
+	kref_put(&domain->kref, rocket_iommu_domain_destroy);
+}
+
+void
+rocket_iommu_domains_close(struct rocket_file_priv *rocket_priv)
+{
+	unsigned int i;
+
+	for (i = 0; i < ROCKET_MAX_IOMMU_DOMAINS; i++) {
+		struct rocket_iommu_domain *domain = rocket_priv->domains[i];
+
+		if (!domain)
+			continue;
+
+		rocket_priv->domains[i] = NULL;
+
+		/*
+		 * Safe only because DRM core has already released this file's
+		 * GEM objects before calling .postclose (rocket_postclose()
+		 * calls us), so every domain's drm_mm is provably empty here --
+		 * same invariant the original single-domain code relied on for
+		 * its drm_mm_takedown() at postclose.
+		 */
+		drm_mm_takedown(&domain->mm);
+		mutex_destroy(&domain->mm_lock);
+		rocket_iommu_domain_put(domain);
+	}
+}
+
+static int
+rocket_open(struct drm_device *dev, struct drm_file *file)
+{
+	struct rocket_device *rdev = to_rocket_device(dev);
+	struct rocket_file_priv *rocket_priv;
+	int ret;
+
+	if (!try_module_get(THIS_MODULE))
+		return -EINVAL;
+
+	rocket_priv = kzalloc_obj(*rocket_priv);
+	if (!rocket_priv) {
+		ret = -ENOMEM;
+		goto err_put_mod;
+	}
+
+	rocket_priv->rdev = rdev;
+	mutex_init(&rocket_priv->domains_lock);
+	/* Domains are created lazily on first MEM_CREATE/SUBMIT reference to a
+	 * given iommu_domain_id -- see rocket_iommu_domain_get(). */
+
+	file->driver_priv = rocket_priv;
+
+	ret = rocket_job_open(rocket_priv);
+	if (ret)
+		goto err_destroy_lock;
+
+	return 0;
+
+err_destroy_lock:
+	mutex_destroy(&rocket_priv->domains_lock);
+	kfree(rocket_priv);
+err_put_mod:
+	module_put(THIS_MODULE);
+	return ret;
+}
+
+static void
+rocket_postclose(struct drm_device *dev, struct drm_file *file)
+{
+	struct rocket_file_priv *rocket_priv = file->driver_priv;
+
+	rocket_job_close(rocket_priv);
+	rocket_iommu_domains_close(rocket_priv);
+	mutex_destroy(&rocket_priv->domains_lock);
+	kfree(rocket_priv);
+	module_put(THIS_MODULE);
+}
+
+static const struct drm_ioctl_desc rkopnu_ioctls[] = {
+	DRM_IOCTL_DEF_DRV(RKNPU_ACTION,      rkopnu_ioctl_action,      DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(RKNPU_SUBMIT,      rkopnu_ioctl_submit,      DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(RKNPU_MEM_CREATE,  rkopnu_ioctl_mem_create,  DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(RKNPU_MEM_MAP,     rkopnu_ioctl_mem_map,     DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(RKNPU_MEM_DESTROY, rkopnu_ioctl_mem_destroy, DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(RKNPU_MEM_SYNC,    rkopnu_ioctl_mem_sync,    DRM_RENDER_ALLOW),
+};
+
+DEFINE_DRM_GEM_FOPS(rkopnu_driver_fops);
+
+/*
+ * Rocket driver version:
+ * - 1.0 - initial interface
+ */
+static const struct drm_driver rocket_drm_driver = {
+	.driver_features	= DRIVER_RENDER | DRIVER_GEM,
+	.open			= rocket_open,
+	.postclose		= rocket_postclose,
+	.gem_create_object	= rocket_gem_create_object,
+	.ioctls			= rkopnu_ioctls,
+	.num_ioctls		= ARRAY_SIZE(rkopnu_ioctls),
+	.fops			= &rkopnu_driver_fops,
+	.name			= "rknpu",
+	.desc			= "rkopnu (rknpu ABI on mainline rocket)",
+};
+
+static int rocket_probe(struct platform_device *pdev)
+{
+	int ret;
+
+	if (rdev == NULL) {
+		/* First core probing, initialize DRM device. */
+		rdev = rocket_device_init(drm_dev, &rocket_drm_driver);
+		if (IS_ERR(rdev)) {
+			dev_err(&pdev->dev, "failed to initialize rocket device\n");
+			return PTR_ERR(rdev);
+		}
+	}
+
+	unsigned int core = rdev->num_cores;
+
+	dev_set_drvdata(&pdev->dev, rdev);
+
+	rdev->cores[core].rdev = rdev;
+	rdev->cores[core].dev = &pdev->dev;
+	rdev->cores[core].index = core;
+
+	rdev->num_cores++;
+
+	ret = rocket_core_init(&rdev->cores[core]);
+	if (ret) {
+		rdev->num_cores--;
+
+		if (rdev->num_cores == 0) {
+			rocket_device_fini(rdev);
+			rdev = NULL;
+		}
+
+		return ret;
+	}
+
+	/*
+	 * PD_NPU1/PD_NPU2 (cores 1/2) are genpd subdomains of core 0's
+	 * PD_NPUTOP, which owns the shared NPU NIU/interconnect. Gating a
+	 * subdomain concurrently with or independently of PD_NPUTOP races the
+	 * shared idle-request/QoS handshake and faults with an async SError
+	 * under sustained load. Link the subordinate cores to core 0 so
+	 * PD_NPUTOP resumes before, and suspends strictly after, NPU1/NPU2,
+	 * gating the block as a unit.
+	 */
+	if (core > 0)
+		device_link_add(rdev->cores[core].dev, rdev->cores[0].dev,
+				DL_FLAG_PM_RUNTIME | DL_FLAG_STATELESS);
+
+	return ret;
+}
+
+static int find_core_for_dev(struct device *dev);
+
+static void rocket_remove(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	int core = find_core_for_dev(dev);
+
+	if (core < 0)
+		return;
+
+	rocket_core_fini(&rdev->cores[core]);
+	rdev->num_cores--;
+
+	if (rdev->num_cores == 0) {
+		/* Last core removed, deinitialize DRM device. */
+		rocket_device_fini(rdev);
+		rdev = NULL;
+	}
+}
+
+static const struct of_device_id dt_match[] = {
+	{ .compatible = "rockchip,rk3588-rknn-core" },
+	{}
+};
+MODULE_DEVICE_TABLE(of, dt_match);
+
+static int find_core_for_dev(struct device *dev)
+{
+	struct rocket_device *rdev = dev_get_drvdata(dev);
+
+	for (unsigned int core = 0; core < rdev->num_cores; core++) {
+		if (dev == rdev->cores[core].dev)
+			return core;
+	}
+
+	return -1;
+}
+
+static int rocket_device_runtime_resume(struct device *dev)
+{
+	struct rocket_device *rdev = dev_get_drvdata(dev);
+	int core = find_core_for_dev(dev);
+	int err = 0;
+
+	if (core < 0)
+		return -ENODEV;
+
+	err = clk_bulk_prepare_enable(ARRAY_SIZE(rdev->cores[core].clks), rdev->cores[core].clks);
+	if (err) {
+		dev_err(dev, "failed to enable (%d) clocks for core %d\n", err, core);
+		return err;
+	}
+
+	return 0;
+}
+
+static int rocket_device_runtime_suspend(struct device *dev)
+{
+	struct rocket_device *rdev = dev_get_drvdata(dev);
+	int core = find_core_for_dev(dev);
+
+	if (core < 0)
+		return -ENODEV;
+
+	if (!rocket_job_is_idle(&rdev->cores[core]))
+		return -EBUSY;
+
+	clk_bulk_disable_unprepare(ARRAY_SIZE(rdev->cores[core].clks), rdev->cores[core].clks);
+
+	return 0;
+}
+
+EXPORT_GPL_DEV_PM_OPS(rocket_pm_ops) = {
+	RUNTIME_PM_OPS(rocket_device_runtime_suspend, rocket_device_runtime_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend, pm_runtime_force_resume)
+};
+
+static struct platform_driver rocket_driver = {
+	.probe = rocket_probe,
+	.remove = rocket_remove,
+	.driver	 = {
+		/*
+		 * "rkopnu", not "rocket": rkopnu is a fork of the in-tree rocket
+		 * driver but a distinct platform_driver. Using a distinct name
+		 * avoids the /sys/bus/platform/drivers/ name collision if the
+		 * in-tree rocket module is also present, and makes sysfs/dmesg
+		 * agree with the "rkopnu" module name. (The DRM driver name stays
+		 * "rknpu" — librknnrt identifies its device by that.) The in-tree
+		 * rocket still matches the same OF compatible, so it must be
+		 * blacklisted for rkopnu to win the NPU bind deterministically.
+		 */
+		.name = "rkopnu",
+		.pm = pm_ptr(&rocket_pm_ops),
+		.of_match_table = dt_match,
+	},
+};
+
+static int __init rocket_register(void)
+{
+	drm_dev = platform_device_register_simple("rknn", -1, NULL, 0);
+	if (IS_ERR(drm_dev))
+		return PTR_ERR(drm_dev);
+
+	return platform_driver_register(&rocket_driver);
+}
+
+static void __exit rocket_unregister(void)
+{
+	platform_driver_unregister(&rocket_driver);
+
+	platform_device_unregister(drm_dev);
+}
+
+module_init(rocket_register);
+module_exit(rocket_unregister);
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("rkopnu: vendor rknpu ioctl ABI on a mainline kernel (RK3588 NPU)");
+MODULE_AUTHOR("Tomeu Vizoso");

@@ -45,6 +45,45 @@
 		mmc1 = &sdmmc;
 	};
 
+	/* OPP table do NPU (3x RKNN cores). Pares V/f vendor: 300MHz-1GHz.
+	 * Compartilhada por rknn_core_0/1/2 via operating-points-v2. */
+	npu_opp_table: opp-table-npu {
+		compatible = "operating-points-v2";
+
+		opp-300000000 {
+			opp-hz = /bits/ 64 <300000000>;
+			opp-microvolt = <700000>;
+		};
+		opp-400000000 {
+			opp-hz = /bits/ 64 <400000000>;
+			opp-microvolt = <700000>;
+		};
+		opp-500000000 {
+			opp-hz = /bits/ 64 <500000000>;
+			opp-microvolt = <700000>;
+		};
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt = <700000>;
+		};
+		opp-700000000 {
+			opp-hz = /bits/ 64 <700000000>;
+			opp-microvolt = <700000>;
+		};
+		opp-800000000 {
+			opp-hz = /bits/ 64 <800000000>;
+			opp-microvolt = <750000>;
+		};
+		opp-900000000 {
+			opp-hz = /bits/ 64 <900000000>;
+			opp-microvolt = <800000>;
+		};
+		opp-1000000000 {
+			opp-hz = /bits/ 64 <1000000000>;
+			opp-microvolt = <850000>;
+		};
+	};
+
 	/* Console: uart2 @ 115200 (baixa para compatibilidade com adaptadores
 	 * USB-serial CP2102, que nao suportam 1.5 Mbaud; bate com o debug do
 	 * hardware vendor em fiq_debugger serial-id=2 @ 115200). U-Boot rd-box-rk3588
@@ -478,6 +517,47 @@
 	mali-supply = <&vdd_gpu_s0>;
 	status = "okay";
 };
+
+/* ===== NPU (6 TOPS, 3x RKNN cores) ========================================
+ * O mainline rk3588-base.dtsi ja define os nos rknn_core_0/1/2 (compatible
+ * "rockchip,rk3588-rknn-core") e rknn_mmu_0/1/2 (compatible
+ * "rockchip,rk3588-iommu","rockchip,rk3568-iommu" — suportados pelo driver
+ * rockchip-iommu mainline), porem status="disabled".
+ *
+ * O driver usado e o rkopnu (package kmod-rkopnu): fork do mainline
+ * drivers/accel/rocket que apresenta o ABI ioctl vendor rknpu, permitindo que
+ * a librknnrt.so (runtime fechado da Rockchip) rode em kernel mainline sem o
+ * BSP. O rkopnu faz match no MESMO compatible do rocket in-tree, por isso o
+ * CONFIG_DRM_ACCEL_ROCKET fica unset no target config (evita conflito de bind).
+ *
+ * O regulador vdd_npu_s0 (rk8602 no i2c1) ja esta definido acima. A OPP table
+ * usa os pares V/f vendor (300MHz-1GHz). O assigned-clock-rates da base dtsi
+ * (200MHz) e sobrescrito pelo OPP framework quando o driver seta a OPP alvo.
+ */
+&rknn_core_0 {
+	npu-supply = <&vdd_npu_s0>;
+	sram-supply = <&vdd_npu_s0>;
+	operating-points-v2 = <&npu_opp_table>;
+	status = "okay";
+};
+
+&rknn_core_1 {
+	npu-supply = <&vdd_npu_s0>;
+	sram-supply = <&vdd_npu_s0>;
+	operating-points-v2 = <&npu_opp_table>;
+	status = "okay";
+};
+
+&rknn_core_2 {
+	npu-supply = <&vdd_npu_s0>;
+	sram-supply = <&vdd_npu_s0>;
+	operating-points-v2 = <&npu_opp_table>;
+	status = "okay";
+};
+
+&rknn_mmu_0 { status = "okay"; };
+&rknn_mmu_1 { status = "okay"; };
+&rknn_mmu_2 { status = "okay"; };
 
 
 /* pcie2x1l0: WiFi ap6275p (rp-wifi-bt-pcie-ap6275p)
