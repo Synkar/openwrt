@@ -464,8 +464,20 @@
  * ficam habilitados. Ja o AV1 decoder (av1d, compatible rockchip,rk3588-av1-vpu)
  * NAO tem driver mainline em 6.18 (grep vazio em drivers/**.c; rkvdec so cobre
  * rk3399-vdec) -> desabilitado para nao ficar como consumidor fantasma de
- * power-domain e gerar "sync_state() pending due to fdc70000.video-codec". */
+ * power-domain e gerar "sync state() pending due to fdc70000.video-codec". */
 &av1d { status = "disabled"; };
+
+/* GPU Mali-G610 (Valhall-CSF) via driver mainline panthor. O no gpu@fb000000 ja
+ * vem na rk3588-base.dtsi, mas status="disabled" e sem mali-supply. O regulador
+ * vdd_gpu_s0 (rk806 dcdc-reg1) ja esta definido acima no PMIC. O panthor faz
+ * devfreq (simple_ondemand, selecionado pelo proprio KCONFIG do driver) sobre o
+ * clock CLK_GPU gerenciado pelo SCMI -> scaling dinamico de frequencia/tensao.
+ * Requer kmod-drm-panthor + mali-csffw (firmware arm/mali/arch10.8/mali_csffw.bin
+ * carregado por request_firmware no panthor_fw.c). */
+&gpu {
+	mali-supply = <&vdd_gpu_s0>;
+	status = "okay";
+};
 
 
 /* pcie2x1l0: WiFi ap6275p (rp-wifi-bt-pcie-ap6275p)

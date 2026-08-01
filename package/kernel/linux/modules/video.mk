@@ -618,6 +618,26 @@ endef
 
 $(eval $(call KernelPackage,drm-ivpu))
 
+define KernelPackage/drm-panthor
+  SUBMENU:=$(VIDEO_MENU)
+  TITLE:=ARM Mali CSF (Valhall) DRM support
+  DEPENDS:=@DISPLAY_SUPPORT +kmod-drm +kmod-drm-shmem-helper +kmod-drm-sched \
+	+kmod-drm-exec
+  KCONFIG:=CONFIG_DRM_PANTHOR
+  FILES:= \
+	$(LINUX_DIR)/drivers/gpu/drm/panthor/panthor.ko \
+	$(LINUX_DIR)/drivers/gpu/drm/drm_gpuvm.ko
+  AUTOLOAD:=$(call AutoProbe,drm_gpuvm panthor)
+endef
+
+define KernelPackage/drm-panthor/description
+  DRM driver for ARM Mali CSF-based GPUs (Valhall Gxxx: G610/G620/G625/etc).
+  The Mali-G68/G78 (Valhall, non-CSF) are covered by the panfrost driver instead.
+  Requires the Mali CSF firmware (mali-csffw package) and IOMMU support.
+endef
+
+$(eval $(call KernelPackage,drm-panthor))
+
 define KernelPackage/drm-imx
   SUBMENU:=$(VIDEO_MENU)
   TITLE:=Freescale i.MX DRM support
