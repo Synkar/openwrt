@@ -45,8 +45,6 @@
 		mmc1 = &sdmmc;
 	};
 
-	/* OPP table do NPU (3x RKNN cores). Pares V/f vendor: 300MHz-1GHz.
-	 * Compartilhada por rknn_core_0/1/2 via operating-points-v2. */
 	npu_opp_table: opp-table-npu {
 		compatible = "operating-points-v2";
 
@@ -506,34 +504,11 @@
  * power-domain e gerar "sync state() pending due to fdc70000.video-codec". */
 &av1d { status = "disabled"; };
 
-/* GPU Mali-G610 (Valhall-CSF) via driver mainline panthor. O no gpu@fb000000 ja
- * vem na rk3588-base.dtsi, mas status="disabled" e sem mali-supply. O regulador
- * vdd_gpu_s0 (rk806 dcdc-reg1) ja esta definido acima no PMIC. O panthor faz
- * devfreq (simple_ondemand, selecionado pelo proprio KCONFIG do driver) sobre o
- * clock CLK_GPU gerenciado pelo SCMI -> scaling dinamico de frequencia/tensao.
- * Requer kmod-drm-panthor + mali-csffw (firmware arm/mali/arch10.8/mali_csffw.bin
- * carregado por request_firmware no panthor_fw.c). */
 &gpu {
 	mali-supply = <&vdd_gpu_s0>;
 	status = "okay";
 };
 
-/* ===== NPU (6 TOPS, 3x RKNN cores) ========================================
- * O mainline rk3588-base.dtsi ja define os nos rknn_core_0/1/2 (compatible
- * "rockchip,rk3588-rknn-core") e rknn_mmu_0/1/2 (compatible
- * "rockchip,rk3588-iommu","rockchip,rk3568-iommu" — suportados pelo driver
- * rockchip-iommu mainline), porem status="disabled".
- *
- * O driver usado e o rkopnu (package kmod-rkopnu): fork do mainline
- * drivers/accel/rocket que apresenta o ABI ioctl vendor rknpu, permitindo que
- * a librknnrt.so (runtime fechado da Rockchip) rode em kernel mainline sem o
- * BSP. O rkopnu faz match no MESMO compatible do rocket in-tree, por isso o
- * CONFIG_DRM_ACCEL_ROCKET fica unset no target config (evita conflito de bind).
- *
- * O regulador vdd_npu_s0 (rk8602 no i2c1) ja esta definido acima. A OPP table
- * usa os pares V/f vendor (300MHz-1GHz). O assigned-clock-rates da base dtsi
- * (200MHz) e sobrescrito pelo OPP framework quando o driver seta a OPP alvo.
- */
 &rknn_core_0 {
 	npu-supply = <&vdd_npu_s0>;
 	sram-supply = <&vdd_npu_s0>;

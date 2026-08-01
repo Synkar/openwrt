@@ -860,9 +860,5 @@ CONFIG_SND_SOC_SDCA_OPTIONAL=y
 CONFIG_SND_USB=y
 CONFIG_SND_VERBOSE_PROCFS=y
 
-# Accell subsystem for the out-of-tree rkopnu NPU driver (fork of mainline
-# drivers/accel/rocket; matches the same DT compatible rockchip,rk3588-rknn-core
-# but presents the vendor rknpu ioctl ABI for librknnrt.so). The in-tree rocket
-# driver is deliberately NOT enabled to avoid a bind conflict with rkopnu.
 CONFIG_DRM_ACCEL=y
 # CONFIG_DRM_ACCEL_ROCKET is not set
