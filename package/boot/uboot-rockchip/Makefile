@@ -382,6 +382,7 @@ define U-Boot/rd-box-rk3588
   NAME:=RD-BOX RK3588
   UBOOT_CONFIG:=generic-rk3588
   UBOOT_CUSTOMIZE_CONFIG += --set-val BAUDRATE 115200
+  UBOOT_CUSTOMIZE_CONFIG += --set-val BOOTDELAY 0
   BUILD_DEVICES:=rd-box_rk3588
 endef
 
