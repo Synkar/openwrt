@@ -13,6 +13,7 @@
 
 #include "rocket_core.h"
 #include "rocket_device.h"
+#include "rkopnu.h"
 #include "rocket_drv.h"
 #include "rocket_job.h"
 #include "rocket_registers.h"
