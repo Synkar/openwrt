@@ -1589,6 +1589,49 @@ endef
 
 $(eval $(call KernelPackage,video-pxp))
 
+
+define KernelPackage/video-hantro
+  TITLE:=Hantro VPU support
+  DEPENDS:=+kmod-video-mem2mem +kmod-video-dma-contig
+  KCONFIG:= \
+	CONFIG_VIDEO_HANTRO \
+	CONFIG_VIDEO_HANTRO_ROCKCHIP \
+	CONFIG_V4L2_H264 \
+	CONFIG_V4L2_JPEG_HELPER \
+	CONFIG_V4L2_VP9
+  FILES:= \
+	$(LINUX_DIR)/drivers/media/platform/verisilicon/hantro-vpu.ko \
+	$(LINUX_DIR)/drivers/media/v4l2-core/v4l2-h264.ko \
+	$(LINUX_DIR)/drivers/media/v4l2-core/v4l2-jpeg.ko \
+	$(LINUX_DIR)/drivers/media/v4l2-core/v4l2-vp9.ko
+  AUTOLOAD:=$(call AutoProbe,hantro-vpu v4l2-h264 v4l2-jpeg v4l2-vp9)
+  $(call AddDepends/video)
+endef
+
+define KernelPackage/video-hantro/description
+ Hantro VPU (V4L2 mem2mem) video codec driver. Covers Rockchip rk3568/rk3588
+ VPU/VEPU units (JPEG/H.264/HEVC/VP9 encode/decode).
+endef
+
+$(eval $(call KernelPackage,video-hantro))
+
+
+define KernelPackage/video-rga
+  TITLE:=Rockchip RGA support
+  DEPENDS:=+kmod-video-mem2mem +kmod-video-dma-sg
+  KCONFIG:=CONFIG_VIDEO_ROCKCHIP_RGA
+  FILES:=$(LINUX_DIR)/drivers/media/platform/rockchip/rga/rockchip-rga.ko
+  AUTOLOAD:=$(call AutoProbe,rockchip-rga)
+  $(call AddDepends/video)
+endef
+
+define KernelPackage/video-rga/description
+ Rockchip Raster Graphic Acceleration (RGA) 2D engine driver.
+endef
+
+$(eval $(call KernelPackage,video-rga))
+
+
 define KernelPackage/video-imx-mipi-csis
   TITLE:=i.MX7/8 MIPI-CSI2 CSIS receiver
   DEPENDS:=@TARGET_imx +kmod-video-async +kmod-video-fwnode
