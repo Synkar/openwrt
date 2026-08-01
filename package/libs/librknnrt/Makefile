@@ -29,10 +29,10 @@ define Package/librknnrt/description
   (external/rknpu2/runtime/Linux/librknn_api/aarch64).
 
   NOTE: this is a glibc-linked binary (NEEDED: libc.so.6, libpthread.so.0,
-  libdl.so.2, libm.so.6, libstdc++.so.6, libgcc_s.so.1). On the default musl
-  target it will NOT load without a glibc compatibility layer — install the
-  gcompat package (not yet in the Synkar feeds) or switch the target libc to
-  glibc (CONFIG_LIBC_USE_GLIBC) as a fallback.
+  libdl.so.2, libm.so.6, libstdc++.so.6, libgcc_s.so.1). It does NOT load on a
+  musl target — the rd-box-rk3588 device uses the glibc target
+  (CONFIG_LIBC_USE_GLIBC) for this reason, and ships this package via its
+  DEVICE_PACKAGES.
 endef
 
 define Build/Compile
