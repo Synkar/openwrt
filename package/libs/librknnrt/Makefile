@@ -17,7 +17,7 @@ define Package/librknnrt
   SECTION:=libs
   CATEGORY:=Libraries
   TITLE:=Rockchip RKNN runtime (librknnrt.so v2.3.2)
-  DEPENDS:=@TARGET_rockchip +libstdcpp
+  DEPENDS:=@TARGET_rockchip +libstdcpp +libpthread
 endef
 
 define Package/librknnrt/description
