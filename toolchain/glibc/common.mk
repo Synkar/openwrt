@@ -14,7 +14,7 @@ PKG_SOURCE_PROTO:=git
 PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
 PKG_SOURCE_VERSION:=4070d808bea1c077eb7e7d52b52b91cae98205d5
 PKG_MIRROR_HASH:=af972bcdea69ae15851a8ca27820553af1b5825754dfb9bea5a7dc8d316e8003
-PKG_SOURCE_URL:=https://sourceware.org/git/glibc.git
+PKG_SOURCE_URL:=https://github.com/kraj/glibc.git
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION)-$(PKG_SOURCE_VERSION).tar.zst
 PKG_CPE_ID:=cpe:/a:gnu:glibc
 
