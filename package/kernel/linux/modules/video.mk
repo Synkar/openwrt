@@ -1615,7 +1615,7 @@ define KernelPackage/video-hantro
   DEPENDS:=+kmod-video-mem2mem +kmod-video-dma-contig
   KCONFIG:= \
 	CONFIG_VIDEO_HANTRO \
-	CONFIG_VIDEO_HANTRO_ROCKCHIP \
+	CONFIG_VIDEO_HANTRO_ROCKCHIP=y \
 	CONFIG_V4L2_H264 \
 	CONFIG_V4L2_JPEG_HELPER \
 	CONFIG_V4L2_VP9
