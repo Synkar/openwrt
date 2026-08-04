@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Synkar <dev@synkar.com>
+Date: Tue, 4 Aug 2026 18:00:00 -0300
+Subject: [PATCH] rockchip: restore dma-buf heaps as built-in objects
+
+The generic hack 904-debloat_dma_buf.patch converts the dma-buf heap
+drivers (system_heap, cma_heap) from built-in objects to entries of the
+`dma-buf-objs-y` variable in the heaps/ subdirectory Makefile. That
+variable is defined in a separate kbuild subdir invocation and never
+propagates to the parent drivers/dma-buf/Makefile, so with the hack the
+heap drivers are never compiled at all: CONFIG_DMABUF_HEAPS_SYSTEM/CMA
+are silently dead symbols and /dev/dma_heap stays empty even when the
+config options are =y.
+
+The rk3588 needs the dma-buf heaps for the Rockchip MPP userspace
+(librkchip-mpp) dma_heap allocator, which opens /dev/dma_heap/system
+and /dev/dma_heap/cma. Restore the heaps/Makefile to obj-y so the heap
+drivers are built into the kernel image.
+
+Signed-off-by: Synkar <dev@synkar.com>
+---
+ drivers/dma-buf/heaps/Makefile | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+--- a/drivers/dma-buf/heaps/Makefile
++++ b/drivers/dma-buf/heaps/Makefile
+@@ -1,3 +1,3 @@
+ # SPDX-License-Identifier: GPL-2.0
+-dma-buf-objs-$(CONFIG_DMABUF_HEAPS_SYSTEM)	+= system_heap.o
+-dma-buf-objs-$(CONFIG_DMABUF_HEAPS_CMA)		+= cma_heap.o
++obj-$(CONFIG_DMABUF_HEAPS_SYSTEM)	+= system_heap.o
++obj-$(CONFIG_DMABUF_HEAPS_CMA)		+= cma_heap.o
