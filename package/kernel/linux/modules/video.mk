@@ -1652,6 +1652,24 @@ endef
 $(eval $(call KernelPackage,video-rga))
 
 
+define KernelPackage/video-rkvenc
+  TITLE:=Rockchip RKVENC (VEPU580) encoder support
+  DEPENDS:=+kmod-dma-buf
+  KCONFIG:=CONFIG_VIDEO_ROCKCHIP_RKVENC
+  FILES:=$(LINUX_DIR)/drivers/media/platform/rockchip/rkvenc/rkvenc.ko
+  AUTOLOAD:=$(call AutoProbe,rkvenc)
+  $(call AddDepends/video)
+endef
+
+define KernelPackage/video-rkvenc/description
+ Rockchip VEPU580 hardware video encoder (H.264/H.265/JPEG, RK3588).
+ Exposes the Rockchip MPP ABI via /dev/mpp_service; out-of-tree driver
+ consumed by the librockchip-mpp userspace library.
+endef
+
+$(eval $(call KernelPackage,video-rkvenc))
+
+
 define KernelPackage/video-imx-mipi-csis
   TITLE:=i.MX7/8 MIPI-CSI2 CSIS receiver
   DEPENDS:=@TARGET_imx +kmod-video-async +kmod-video-fwnode
