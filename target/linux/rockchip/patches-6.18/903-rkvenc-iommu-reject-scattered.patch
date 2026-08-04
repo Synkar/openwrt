@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Synkar <dev@synkar.com>
+Date: Tue, 4 Aug 2026 19:45:00 -0300
+Subject: [PATCH] rockchip: rkvenc: reject non-contiguous imported dma-bufs
+
+rkvenc encodes with the IOMMU in passthrough (identity) mode: the
+device default domain is IOMMU_DOMAIN_PASSTHROUGH, so dma_buf mappings
+returned by dma_buf_map_attachment() are physical addresses and the
+encoder hardware walks the physical range [buffer->iova, buffer->iova + size).
+
+That is only safe when the imported dma-buf is physically contiguous
+(single sg entry, e.g. CMA). For a page-scattered buffer (dma-buf heaps
+"system" heap) the sg addresses are not sequential, and letting the
+hardware write the whole reported range scribbles over arbitrary RAM,
+producing random kernel crashes far from the offending code.
+
+Verify the sg entries of an imported buffer are physically contiguous
+(each sg_dma_address() equals the previous entry address plus length)
+and reject the import otherwise. A rejected import fails the encode with
+a clear error instead of silently corrupting memory.
+
+Signed-off-by: Synkar <dev@synkar.com>
+---
+--- a/drivers/media/platform/rockchip/rkvenc/rkvenc_iommu.c
++++ b/drivers/media/platform/rockchip/rkvenc/rkvenc_iommu.c
+@@ -187,9 +187,19 @@
+ 	{
+ 		struct scatterlist *sg;
+ 		size_t size = 0;
+-
+-		for (sg = sgt->sgl; sg; sg = sg_next(sg))
++		dma_addr_t addr, expect = sg_dma_address(sgt->sgl);
++
++		for (sg = sgt->sgl; sg; sg = sg_next(sg)) {
++			addr = sg_dma_address(sg);
++			if (addr != expect) {
++				rkvenc_err("fd %d not physically contiguous "
++					   "(%pad != %pad)\n", fd, &expect, &addr);
++				ret = -EINVAL;
++				goto fail_map;
++			}
+ 			size += sg_dma_len(sg);
++			expect += sg_dma_len(sg);
++		}
+ 		buffer->size = size;
+ 	}
+ 	buffer->attach = attach;
