@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Synkar <dev@synkar.com>
+Date: Mon, 3 Aug 2026 20:00:00 -0300
+Subject: [PATCH] drm: display: select SND_SOC_HDMI_CODEC for HDMI audio helper
+
+DRM_DISPLAY_HDMI_AUDIO_HELPER registers a platform device named
+HDMI_CODEC_DRV_NAME ("hdmi-audio-codec") via drm_connector_hdmi_audio_init(),
+which is bound by the hdmi-codec ASoC codec driver (CONFIG_SND_SOC_HDMI_CODEC).
+
+That symbol is hidden (no prompt) and is only selected by the legacy
+DRM_DW_HDMI_I2S_AUDIO path, not by the QP bridge used on rk3588. As a result,
+on rk3588 (DRM_DW_HDMI_QP + DRM_DISPLAY_HDMI_AUDIO_HELPER) the codec platform
+device stays unbound and the hdmi0-sound simple-audio-card defers forever
+("asoc-simple-card: parse error").
+
+Select SND_SOC_HDMI_CODEC from DRM_DISPLAY_HDMI_AUDIO_HELPER so the codec
+driver is built whenever the helper is, matching the runtime dependency.
+
+Signed-off-by: Synkar <dev@synkar.com>
+---
+ drivers/gpu/drm/display/Kconfig | 1 +
+ 1 file changed, 1 insertion(+)
+
+--- a/drivers/gpu/drm/display/Kconfig
++++ b/drivers/gpu/drm/display/Kconfig
+@@ -79,6 +79,7 @@ config DRM_DISPLAY_HDCP_HELPER
+ config DRM_DISPLAY_HDMI_AUDIO_HELPER
+ 	bool
++	select SND_SOC_HDMI_CODEC if SND_SOC
+ 	help
+ 	  DRM display helpers for HDMI Audio functionality (generic HDMI Codec
+ 	  implementation).
