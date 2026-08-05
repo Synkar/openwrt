@@ -1326,9 +1326,62 @@ diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.c bb/drivers/media
 +	/* Sync bitstream buffer if present */
 +	if (task->bs_buf) {
 +		u32 bs_size = rkvenc_read(mpp, 0x4064);
++		u32 bs_lgth = 0;
 +
-+		rkvenc_dma_buf_sync(task->bs_buf, 0, bs_size + task->offset_bs,
++		/* Also read the real bitstream-length register (0x4000) to
++		 * sanity-check the DMA sync range.
++		 */
++		reg = rkvenc_get_class_reg(task, 0x4000);
++		if (reg)
++			bs_lgth = *reg;
++
++		rkvenc_dbg(DEBUG_SLICE,
++			   "task %d finish bs_size(0x4064)=%u bs_lgth(0x4000)=%u off=%u buf_size=%zu\n",
++			   mpp_task->task_index, bs_size, bs_lgth,
++			   task->offset_bs, task->bs_buf->size);
++
++		/* Cache coherency: the HW length register (0x4064) can lag or
++		 * report less than the real written range, leaving the tail of
++		 * the bitstream buffer stale in CPU cache; the CPU then reads
++		 * back corrupt bytes. Invalidate the whole buffer so the CPU
++		 * always sees the bytes the HW actually wrote.
++		 */
++		rkvenc_dma_buf_sync(task->bs_buf, 0, task->bs_buf->size,
 +				    DMA_FROM_DEVICE, true);
++	} else {
++		/* H264/H265: task->bs_buf is only set for JPEG (the fd is
++		 * recovered from a JPEG-specific register). For H264/H265 the
++		 * bitstream (packet) buffer is passed via the BSBB register
++		 * (absolute 0x02b4, PIC class offset 13) and translated to an
++		 * IOVA by rkvenc_translate_reg_address(). With a non-coherent
++		 * device the CPU cache holds stale lines for that buffer after
++		 * the HW wrote it, so invalidate it here (DMA_FROM_DEVICE) to
++		 * make the userspace readback see exactly what the HW produced.
++		 */
++		u32 pic_idx = (RKVENC2_REG_ADR_BSBB - 0x0280) / sizeof(u32);
++		struct rkvenc_class_msg *pic = &task->reg[RKVENC_CLASS_PIC];
++		u32 bs_iova = 0;
++
++		if (pic->valid && pic->data)
++			bs_iova = pic->data[pic_idx];
++
++		for (i = 0; i < mpp_task->mem_count; i++) {
++			struct rkvenc_mem_region *mr = &mpp_task->mem_regions[i];
++
++			if (mr->is_dup || !mr->hdl)
++				continue;
++			if (bs_iova >= mr->iova && bs_iova < mr->iova + mr->len) {
++				struct rkvenc_dma_buffer *bs = mr->hdl;
++
++				rkvenc_dbg(DEBUG_SLICE,
++					   "task %d sync packet buf bsbb=%#08x iova=%pad len=%lu\n",
++					   mpp_task->task_index, bs_iova,
++					   &mr->iova, mr->len);
++				rkvenc_dma_buf_sync(bs, 0, bs->size,
++						    DMA_FROM_DEVICE, true);
++				break;
++			}
++		}
 +	}
 +
 +	/* Revert irq status register for userspace readback */
