@@ -1,0 +1,1133 @@
+diff -ruN aa/arch/arm64/boot/dts/rockchip/rk3588-base.dtsi bb/arch/arm64/boot/dts/rockchip/rk3588-base.dtsi
+--- aa/arch/arm64/boot/dts/rockchip/rk3588-base.dtsi	2026-02-09 18:12:23
++++ bb/arch/arm64/boot/dts/rockchip/rk3588-base.dtsi	2026-08-06 16:00:00
+@@ -1441,6 +1441,19 @@
+ 		status = "okay";
+ 	};
+ 
++	vepu2: mpp-vepu2@fdb50000 {
++		compatible = "rockchip,rk3588-mpp-vepu2";
++		reg = <0x0 0xfdb50000 0x0 0x400>;
++		interrupts = <GIC_SPI 120 IRQ_TYPE_LEVEL_HIGH 0>;
++		interrupt-names = "irq_vepu";
++		clocks = <&cru ACLK_VPU>, <&cru HCLK_VPU>;
++		clock-names = "aclk_vcodec", "hclk_vcodec";
++		iommus = <&vpu121_mmu>;
++		power-domains = <&power RK3588_PD_VDPU>;
++		rockchip,srv = <&mpp_srv>;
++		status = "disabled";
++	};
++
+ 	av1d: video-codec@fdc70000 {
+ 		compatible = "rockchip,rk3588-av1-vpu";
+ 		reg = <0x0 0xfdc70000 0x0 0x800>;
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/Makefile bb/drivers/media/platform/rockchip/rkvenc/Makefile
+--- aa/drivers/media/platform/rockchip/rkvenc/Makefile	2026-08-06 16:27:19.835599390 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/Makefile	2026-08-06 20:06:15.493705452 -0300
+@@ -1,2 +1,2 @@
+ obj-$(CONFIG_VIDEO_ROCKCHIP_RKVENC) += rkvenc.o
+-rkvenc-objs := rkvenc_drv.o rkvenc_hw.o rkvenc_service.o rkvenc_task.o rkvenc_iommu.o
++rkvenc-objs := rkvenc_drv.o rkvenc_hw.o rkvenc_service.o rkvenc_task.o rkvenc_iommu.o vepu2_drv.o
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_drv.c bb/drivers/media/platform/rockchip/rkvenc/rkvenc_drv.c
+--- aa/drivers/media/platform/rockchip/rkvenc/rkvenc_drv.c	2026-08-06 16:27:19.835599390 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/rkvenc_drv.c	2026-08-06 20:06:15.493705452 -0300
+@@ -303,6 +303,12 @@
+ 	if (ret)
+ 		return ret;
+ 
++	enc->alloc_task = rkvenc580_alloc_task;
++	enc->hw_run = rkvenc_hw_run;
++	enc->hw_finish = rkvenc_hw_finish;
++	enc->result = rkvenc580_result;
++	enc->free_task = rkvenc580_free_task;
++
+ 	/* Attach to service */
+ 	ret = rkvenc_attach_service(enc);
+ 	if (ret) {
+@@ -473,9 +480,33 @@
+ 	},
+ };
+ 
+-module_platform_driver(rkvenc_driver);
++extern struct platform_driver vepu2_driver;
++
++static int __init rkvenc_module_init(void)
++{
++	int ret;
++
++	ret = platform_driver_register(&rkvenc_driver);
++	if (ret)
++		return ret;
++
++	ret = platform_driver_register(&vepu2_driver);
++	if (ret)
++		platform_driver_unregister(&rkvenc_driver);
++
++	return ret;
++}
++
++static void __exit rkvenc_module_exit(void)
++{
++	platform_driver_unregister(&vepu2_driver);
++	platform_driver_unregister(&rkvenc_driver);
++}
++
++module_init(rkvenc_module_init);
++module_exit(rkvenc_module_exit);
+ 
+-MODULE_DESCRIPTION("Rockchip VEPU580 (RKVENC v2) H.265/H.264/JPEG encoder driver");
++MODULE_DESCRIPTION("Rockchip VEPU580/VEPU2 H.265/H.264/VP8/JPEG encoder driver");
+ MODULE_LICENSE("Dual MIT/GPL");
+ MODULE_AUTHOR("Rockchip Electronics Co., Ltd.");
+ MODULE_IMPORT_NS("DMA_BUF");
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.c bb/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.c
+--- aa/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.c	2026-08-06 16:27:19.835599390 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.c	2026-08-06 20:06:15.493705452 -0300
+@@ -493,29 +493,19 @@
+ 	return ret;
+ }
+ 
+-/* ---- Run task: write registers and start HW ---- */
+-int rkvenc_hw_run(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task)
++int rkvenc_hw_run_prepare(struct rkvenc_dev *enc)
+ {
+-	u32 i, j;
+-	u32 start_val = 0;
+ 	int ret;
+-	struct rkvenc_task *task = container_of(mpp_task, struct rkvenc_task, mpp_task);
+-	const struct rkvenc_hw_info *hw = enc->hw_info;
+-
+-	rkvenc_debug_enter();
+ 
+-	/* Power on encoder and its IOMMU */
+ 	if (enc->iommu_info && enc->iommu_info->pdev)
+ 		pm_runtime_get_sync(&enc->iommu_info->pdev->dev);
+ 	pm_runtime_get_sync(enc->dev);
+ 	pm_stay_awake(enc->dev);
+ 	rkvenc_hw_clk_on(enc);
+ 
+-	/* Reset group down_read if available */
+ 	if (enc->reset_group)
+ 		down_read(&enc->reset_group->rw_sem);
+ 
+-	/* Match BSP: ensure IOMMU is attached and fault handler is active */
+ 	ret = rkvenc_iommu_attach(enc->iommu_info);
+ 	if (ret) {
+ 		rkvenc_err("iommu attach failed: %d\n", ret);
+@@ -528,12 +519,51 @@
+ 		goto err_unlock;
+ 	}
+ 
++	return 0;
++
++err_unlock:
++	if (enc->reset_group)
++		up_read(&enc->reset_group->rw_sem);
++	rkvenc_hw_clk_off(enc);
++	pm_relax(enc->dev);
++	pm_runtime_mark_last_busy(enc->dev);
++	pm_runtime_put_autosuspend(enc->dev);
++	if (enc->iommu_info && enc->iommu_info->pdev)
++		pm_runtime_put_sync(&enc->iommu_info->pdev->dev);
++
++	return ret;
++}
++
++void rkvenc_hw_run_commit(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task)
++{
++	rkvenc_iommu_flush_tlb(enc->iommu_info);
++	enc->cur_task = mpp_task;
++	INIT_DELAYED_WORK(&mpp_task->timeout_work, rkvenc_task_timeout_work);
++	schedule_delayed_work(&mpp_task->timeout_work,
++			      msecs_to_jiffies(MPP_WORK_TIMEOUT_DELAY));
++	wmb();
++}
++
++int rkvenc_hw_run(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task)
++{
++	u32 i, j;
++	u32 start_val = 0;
++	int ret;
++	struct rkvenc_task *task = container_of(mpp_task, struct rkvenc_task, mpp_task);
++	const struct rkvenc_hw_info *hw = enc->hw_info;
++
++	rkvenc_debug_enter();
++
++	ret = rkvenc_hw_run_prepare(enc);
++	if (ret)
++		return ret;
++
++	rkvenc2_set_rcbbuf(enc, mpp_task->session, task);
++
+ 	/* Add force clear to avoid pagefault (VEPU580 workaround) */
+-	if (hw->vepu_type == RKVENC_VEPU_580) {
+-		rkvenc_write(enc, hw->enc_clr_base, 0x2);
+-		udelay(5);
+-		rkvenc_write(enc, hw->enc_clr_base, 0x0);
+-	}
++	rkvenc_write(enc, hw->enc_clr_base, 0x2);
++	udelay(5);
++	rkvenc_write(enc, hw->enc_clr_base, 0x0);
+ 
+ 	/* Clear hardware counter */
+ 	rkvenc_write_relaxed(enc, 0x5300, 0x2);
+@@ -566,22 +599,10 @@
+ 		}
+ 	}
+ 
+-	/* flush tlb before starting hardware */
+-	rkvenc_iommu_flush_tlb(enc->iommu_info);
+-
+-	/* init current task */
+-	enc->cur_task = mpp_task;
+-
+ 	/* Calculate and write watchdog timeout threshold */
+ 	rkvenc2_calc_timeout_thd(enc);
+ 
+-	/* Schedule timeout work */
+-	INIT_DELAYED_WORK(&mpp_task->timeout_work, rkvenc_task_timeout_work);
+-	schedule_delayed_work(&mpp_task->timeout_work,
+-			      msecs_to_jiffies(MPP_WORK_TIMEOUT_DELAY));
+-
+-	/* memory barrier before starting HW */
+-	wmb();
++	rkvenc_hw_run_commit(enc, mpp_task);
+ 	rkvenc_write(enc, hw->enc_start_base, start_val);
+ 
+ 	rkvenc_debug_leave();
+@@ -590,7 +611,6 @@
+ 
+ err_deactivate:
+ 	rkvenc_iommu_dev_deactivate(enc->iommu_info, enc);
+-err_unlock:
+ 	if (enc->reset_group)
+ 		up_read(&enc->reset_group->rw_sem);
+ 	rkvenc_hw_clk_off(enc);
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.h bb/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.h
+--- aa/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.h	2026-08-06 16:27:19.835599390 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/rkvenc_hw.h	2026-08-06 20:06:15.493705452 -0300
+@@ -161,6 +161,7 @@
+ 
+ enum RKVENC_VEPU_TYPE {
+ 	RKVENC_VEPU_580		= 0,
++	RKVENC_VEPU_2,
+ 	RKVENC_VEPU_BUTT,
+ };
+ 
+@@ -461,6 +462,9 @@
+ 	u32 hw_cycles;
+ 	s64 hw_time;
+ 
++	u32 task_split;
++	u32 task_split_done;
++
+ 	/* Memory regions */
+ 	struct rkvenc_mem_region mem_regions[MPP_MAX_MEM_REGION];
+ 
+@@ -707,6 +712,13 @@
+ 	const struct rkvenc_hw_info *hw_info;
+ 	const struct rkvenc_trans_info *trans_info;
+ 
++	struct rkvenc_mpp_task *(*alloc_task)(struct rkvenc_session *session,
++					     struct rkvenc_task_msgs *msgs);
++	int (*hw_run)(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task);
++	int (*hw_finish)(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task);
++	int (*result)(struct rkvenc_session *session, struct rkvenc_mpp_task *task);
++	void (*free_task)(struct rkvenc_mpp_task *mpp_task);
++
+ 	s32 core_id;
+ 	u32 task_capacity;
+ 	u32 session_max_buffers;
+@@ -873,9 +886,20 @@
+ int rkvenc_hw_reset(struct rkvenc_dev *enc);
+ void rkvenc_hw_clk_on(struct rkvenc_dev *enc);
+ void rkvenc_hw_clk_off(struct rkvenc_dev *enc);
++int rkvenc_hw_run_prepare(struct rkvenc_dev *enc);
++void rkvenc_hw_run_commit(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task);
+ 
+ /* HW info for VEPU580 */
+ extern struct rkvenc_hw_info rkvenc_v2_hw_info;
+ extern const struct rkvenc_trans_info trans_rkvenc_v2[];
+ 
++struct rkvenc_mpp_task *rkvenc580_alloc_task(struct rkvenc_session *session,
++					     struct rkvenc_task_msgs *msgs);
++int rkvenc580_result(struct rkvenc_session *session,
++		     struct rkvenc_mpp_task *task);
++void rkvenc580_free_task(struct rkvenc_mpp_task *mpp_task);
++void rkvenc2_set_rcbbuf(struct rkvenc_dev *enc,
++			struct rkvenc_session *session,
++			struct rkvenc_task *task);
++
+ #endif /* __RKVENC_HW_H__ */
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c bb/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c
+--- aa/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c	2026-08-06 16:27:19.835599390 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c	2026-08-06 20:06:15.493705452 -0300
+@@ -326,13 +326,14 @@
+ 	}
+ 
+ 	task->task_split = sli_split_en && slen_fifo_en;
++	task->mpp_task.task_split = task->task_split;
+ 
+ 	if (task->task_split)
+ 		INIT_KFIFO(task->slice_info);
+ }
+ 
+ /* ---- Set RCB buffer addresses from SRAM ---- */
+-static void rkvenc2_set_rcbbuf(struct rkvenc_dev *enc,
++void rkvenc2_set_rcbbuf(struct rkvenc_dev *enc,
+ 			       struct rkvenc_session *session,
+ 			       struct rkvenc_task *task)
+ {
+@@ -376,7 +377,6 @@
+ 	}
+ }
+ 
+-/* ---- Alloc task from session ---- */
+ static struct rkvenc_task *rkvenc_alloc_task(struct rkvenc_session *session,
+ 					     struct rkvenc_task_msgs *msgs)
+ {
+@@ -523,9 +524,8 @@
+ 	return NULL;
+ }
+ 
+-/* ---- Result: copy status regs back to userspace ---- */
+-static int rkvenc_result(struct rkvenc_dev *mpp,
+-			 struct rkvenc_mpp_task *mpp_task)
++int rkvenc580_result(struct rkvenc_session *session,
++		     struct rkvenc_mpp_task *mpp_task)
+ {
+ 	u32 i;
+ 	struct rkvenc_task *task = container_of(mpp_task, struct rkvenc_task, mpp_task);
+@@ -567,7 +568,6 @@
+ 	struct rkvenc_dev *enc = container_of(work, struct rkvenc_dev, work);
+ 	struct rkvenc_taskqueue *queue = enc->queue;
+ 	struct rkvenc_mpp_task *mpp_task;
+-	struct rkvenc_task *task;
+ 	struct rkvenc_session *session;
+ 
+ 	/* Process finished tasks (ISR bottom half) */
+@@ -575,10 +575,9 @@
+ 	if (mpp_task && test_bit(TASK_STATE_IRQ, &mpp_task->state)) {
+ 		enc->cur_task = NULL;
+ 
+-		task = container_of(mpp_task, struct rkvenc_task, mpp_task);
+ 		session = mpp_task->session;
+ 
+-		task->irq_status = enc->irq_status;
++		mpp_task->irq_status = enc->irq_status;
+ 
+ 		/* Update DCHS state */
+ 		if (enc->ccu) {
+@@ -591,7 +590,7 @@
+ 		}
+ 
+ 		/* Check for errors */
+-		if (task->irq_status & enc->hw_info->err_mask)
++		if (mpp_task->irq_status & enc->hw_info->err_mask)
+ 			atomic_inc(&enc->reset_request);
+ 
+ 		rkvenc_task_finish(session, mpp_task);
+@@ -640,17 +639,11 @@
+ 
+ 		if (pending_task) {
+ 			struct rkvenc_dev *target = pending_task->mpp;
+-			struct rkvenc_task *enc_task = container_of(pending_task,
+-								   struct rkvenc_task,
+-								   mpp_task);
+ 			int run_ret;
+ 
+-			/* Set RCB buffers if SRAM available */
+-			rkvenc2_set_rcbbuf(target, pending_task->session, enc_task);
+-
+ 			/* Run on hardware */
+ 			set_bit(TASK_STATE_RUNNING, &pending_task->state);
+-			run_ret = rkvenc_hw_run(target, pending_task);
++			run_ret = target->hw_run(target, pending_task);
+ 			if (run_ret) {
+ 				dev_err(target->dev,
+ 					"hw_run failed: %d, failing task %d\n",
+@@ -871,7 +864,7 @@
+ 			      struct rkvenc_task_msgs *msgs)
+ {
+ 	struct rkvenc_mpp_task *task;
+-	struct rkvenc_task *enc_task;
++	struct rkvenc_task *enc_task = NULL;
+ 	union rkvenc2_slice_len_info slice_info;
+ 	int ret = 0;
+ 
+@@ -886,9 +879,7 @@
+ 		return -EIO;
+ 	}
+ 
+-	enc_task = container_of(task, struct rkvenc_task, mpp_task);
+-
+-	if (!enc_task->task_split || enc_task->task_split_done) {
++	if (!task->task_split || task->task_split_done) {
+ task_done_ret:
+ 		ret = wait_event_interruptible(task->wait,
+ 					       test_bit(TASK_STATE_DONE, &task->state));
+@@ -896,7 +887,8 @@
+ 			rkvenc_err("wait task break by signal\n");
+ 
+ 		/* Copy results to userspace */
+-		rkvenc_result(task->mpp, task);
++		if (task->mpp && task->mpp->result)
++			task->mpp->result(session, task);
+ 
+ 		/* Pop from pending list */
+ 		mutex_lock(&session->pending_lock);
+@@ -908,7 +900,7 @@
+ 		return ret;
+ 	}
+ 
+-	/* Slice split mode: wait for all slices */
++	enc_task = container_of(task, struct rkvenc_task, mpp_task);
+ 	do {
+ 		ret = wait_event_interruptible(task->wait,
+ 					       kfifo_out(&enc_task->slice_info,
+@@ -930,7 +923,7 @@
+ {
+ 	struct rkvenc_session *session = filp->private_data;
+ 	struct rkvenc_task_msgs msgs;
+-	struct rkvenc_task *task;
++	struct rkvenc_mpp_task *mpp_task;
+ 	int ret = 0;
+ 
+ 	if (!session || !session->srv) {
+@@ -959,26 +952,26 @@
+ 	if (msgs.set_cnt && session->mpp) {
+ 		struct rkvenc_taskqueue *queue = session->mpp->queue;
+ 
+-		task = rkvenc_alloc_task(session, &msgs);
+-		if (!task) {
++		mpp_task = session->mpp->alloc_task(session, &msgs);
++		if (!mpp_task) {
+ 			rkvenc_err("alloc task failed\n");
+ 			return -ENOMEM;
+ 		}
+ 
+-		msgs.task = &task->mpp_task;
++		msgs.task = mpp_task;
+ 		msgs.mpp = session->mpp;
+ 		msgs.queue = queue;
+ 
+ 		/* Add to pending list */
+-		kref_get(&task->mpp_task.ref);
++		kref_get(&mpp_task->ref);
+ 		mutex_lock(&session->pending_lock);
+-		list_add_tail(&task->mpp_task.pending_link, &session->pending_list);
++		list_add_tail(&mpp_task->pending_link, &session->pending_list);
+ 		mutex_unlock(&session->pending_lock);
+ 
+ 		/* Add to task queue and trigger worker */
+-		set_bit(TASK_STATE_PENDING, &task->mpp_task.state);
++		set_bit(TASK_STATE_PENDING, &mpp_task->state);
+ 		mutex_lock(&queue->pending_lock);
+-		list_add_tail(&task->mpp_task.queue_link, &queue->pending_list);
++		list_add_tail(&mpp_task->queue_link, &queue->pending_list);
+ 		mutex_unlock(&queue->pending_lock);
+ 
+ 		/* Trigger the worker to run the task */
+@@ -1073,6 +1066,29 @@
+ #endif
+ };
+ 
++struct rkvenc_mpp_task *rkvenc580_alloc_task(struct rkvenc_session *session,
++					     struct rkvenc_task_msgs *msgs)
++{
++	struct rkvenc_task *task = rkvenc_alloc_task(session, msgs);
++
++	return task ? &task->mpp_task : NULL;
++}
++
++void rkvenc580_free_task(struct rkvenc_mpp_task *mpp_task)
++{
++	struct rkvenc_task *task = container_of(mpp_task, struct rkvenc_task, mpp_task);
++	int i;
++
++	for (i = 0; i < RKVENC_CLASS_BUTT; i++) {
++		kfree(task->reg[i].data);
++		task->reg[i].data = NULL;
++		task->reg[i].size = 0;
++		task->reg[i].valid = 0;
++	}
++
++	kfree(task);
++}
++
+ /* ---- Service probe/remove ---- */
+ int rkvenc_service_probe(struct platform_device *pdev)
+ {
+@@ -1097,39 +1114,45 @@
+ 	srv->taskqueue_cnt = taskqueue_cnt;
+ 	srv->reset_group_cnt = resetgroup_cnt;
+ 
+-	/* Create the task queue for RKVENC */
+ 	{
+-		struct rkvenc_taskqueue *queue;
+-
+-		queue = devm_kzalloc(dev, sizeof(*queue), GFP_KERNEL);
+-		if (!queue)
+-			return -ENOMEM;
++		static const enum MPP_DEVICE_TYPE qdevs[] = {
++			MPP_DEVICE_RKVENC, MPP_DEVICE_VEPU2
++		};
++		int qi;
++
++		for (qi = 0; qi < ARRAY_SIZE(qdevs); qi++) {
++			struct rkvenc_taskqueue *queue;
++			enum MPP_DEVICE_TYPE dt = qdevs[qi];
++
++			queue = devm_kzalloc(dev, sizeof(*queue), GFP_KERNEL);
++			if (!queue)
++				return -ENOMEM;
++
++			mutex_init(&queue->session_lock);
++			mutex_init(&queue->pending_lock);
++			spin_lock_init(&queue->running_lock);
++			mutex_init(&queue->dev_lock);
++			INIT_LIST_HEAD(&queue->session_attach);
++			INIT_LIST_HEAD(&queue->session_detach);
++			INIT_LIST_HEAD(&queue->pending_list);
++			INIT_LIST_HEAD(&queue->running_list);
++			INIT_LIST_HEAD(&queue->dev_list);
++			atomic_set(&queue->reset_request, 0);
++			atomic_set(&queue->detach_count, 0);
++			atomic_set(&queue->task_id, 0);
++			queue->core_idle = (unsigned long)-1;
++
++			kthread_init_worker(&queue->worker);
++			queue->kworker_task = kthread_run(kthread_worker_fn,
++							  &queue->worker,
++							  "mpp-queue-%d", dt);
++			if (IS_ERR(queue->kworker_task)) {
++				dev_err(dev, "failed to create kthread worker for queue %d\n", dt);
++				return PTR_ERR(queue->kworker_task);
++			}
+ 
+-		mutex_init(&queue->session_lock);
+-		mutex_init(&queue->pending_lock);
+-		spin_lock_init(&queue->running_lock);
+-		mutex_init(&queue->dev_lock);
+-		INIT_LIST_HEAD(&queue->session_attach);
+-		INIT_LIST_HEAD(&queue->session_detach);
+-		INIT_LIST_HEAD(&queue->pending_list);
+-		INIT_LIST_HEAD(&queue->running_list);
+-		INIT_LIST_HEAD(&queue->dev_list);
+-		atomic_set(&queue->reset_request, 0);
+-		atomic_set(&queue->detach_count, 0);
+-		atomic_set(&queue->task_id, 0);
+-		queue->core_idle = (unsigned long)-1;
+-
+-		/* Create kthread worker */
+-		kthread_init_worker(&queue->worker);
+-		queue->kworker_task = kthread_run(kthread_worker_fn,
+-						  &queue->worker,
+-						  "rkvenc-worker");
+-		if (IS_ERR(queue->kworker_task)) {
+-			dev_err(dev, "failed to create kthread worker\n");
+-			return PTR_ERR(queue->kworker_task);
++			srv->task_queues[dt] = queue;
+ 		}
+-
+-		srv->task_queues[MPP_DEVICE_RKVENC] = queue;
+ 	}
+ 
+ 	/* Create reset group */
+@@ -1197,13 +1221,16 @@
+ 	if (!srv)
+ 		return 0;
+ 
+-	/* Stop kthread worker */
+-	if (srv->task_queues[MPP_DEVICE_RKVENC]) {
+-		struct rkvenc_taskqueue *queue = srv->task_queues[MPP_DEVICE_RKVENC];
+-
+-		if (queue->kworker_task) {
+-			kthread_flush_worker(&queue->worker);
+-			kthread_stop(queue->kworker_task);
++	{
++		int qi;
++
++		for (qi = 0; qi < MPP_DEVICE_BUTT; qi++) {
++			struct rkvenc_taskqueue *queue = srv->task_queues[qi];
++
++			if (queue && queue->kworker_task) {
++				kthread_flush_worker(&queue->worker);
++				kthread_stop(queue->kworker_task);
++			}
+ 		}
+ 	}
+ 
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_task.c bb/drivers/media/platform/rockchip/rkvenc/rkvenc_task.c
+--- aa/drivers/media/platform/rockchip/rkvenc/rkvenc_task.c	2026-08-06 16:27:19.835599390 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/rkvenc_task.c	2026-08-06 20:06:15.493705452 -0300
+@@ -39,7 +39,6 @@
+ 	struct rkvenc_mpp_task *task = container_of(ref, struct rkvenc_mpp_task, ref);
+ 	struct rkvenc_session *session;
+ 	struct rkvenc_dev *mpp;
+-	struct rkvenc_task *enc_task = container_of(task, struct rkvenc_task, mpp_task);
+ 
+ 	if (!task->session) {
+ 		rkvenc_err("task %p, task->session is null.\n", task);
+@@ -48,25 +47,15 @@
+ 	session = task->session;
+ 	mpp = rkvenc_get_task_used_device(task, session);
+ 
+-	/* Release memory regions and free class register buffers */
+ 	rkvenc_task_finalize(session, task);
+ 
+-	/* Free class register buffers */
+-	{
+-		int i;
+-
+-		for (i = 0; i < RKVENC_CLASS_BUTT; i++) {
+-			kfree(enc_task->reg[i].data);
+-			enc_task->reg[i].data = NULL;
+-			enc_task->reg[i].size = 0;
+-			enc_task->reg[i].valid = 0;
+-		}
+-	}
+-
+ 	atomic_dec(&session->task_count);
+ 	atomic_dec(&mpp->task_count);
+ 
+-	kfree(enc_task);
++	if (mpp->free_task)
++		mpp->free_task(task);
++	else
++		kfree(task);
+ }
+ 
+ int rkvenc_task_finish(struct rkvenc_session *session,
+@@ -75,8 +66,8 @@
+ 	struct rkvenc_dev *mpp = rkvenc_get_task_used_device(task, session);
+ 	struct rkvenc_taskqueue *queue = mpp->queue;
+ 
+-	/* Read status registers back from HW */
+-	rkvenc_hw_finish(mpp, task);
++	if (mpp->hw_finish)
++		mpp->hw_finish(mpp, task);
+ 
+ 	/* Handle reset if needed */
+ 	if (mpp->reset_group) {
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c bb/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c
+--- aa/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c	1969-12-31 21:00:00.000000000 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c	2026-08-06 20:06:15.493705452 -0300
+@@ -0,0 +1,441 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Copyright (C) 2023 Rockchip Electronics Co., Ltd.
++ * Copyright (C) 2026 Synkar
++ */
++
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/iommu.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/slab.h>
++#include <linux/uaccess.h>
++
++#include "vepu2_hw.h"
++
++struct rkvenc_hw_info vepu2_hw_info = {
++	.hw = {
++		.reg_num	= VEPU2_REG_NUM,
++		.reg_id		= VEPU2_REG_HW_ID_INDEX,
++		.reg_start	= VEPU2_REG_START_INDEX,
++		.reg_end	= VEPU2_REG_END_INDEX,
++		.reg_en		= VEPU2_REG_ENC_EN_INDEX,
++	},
++	.err_mask	= VEPU2_INT_ERROR_MASK,
++	.vepu_type	= RKVENC_VEPU_2,
++};
++
++static const u16 trans_tbl_default[] = {
++	48, 49, 50, 56, 57, 63, 64, 77, 78, 81
++};
++
++static const u16 trans_tbl_vp8e[] = {
++	27, 44, 45, 48, 49, 50, 56, 57, 63, 64,
++	76, 77, 78, 80, 81, 106, 108,
++};
++
++const struct rkvenc_trans_info vepu2_trans_info[] = {
++	[VEPU2_FMT_RESERVED] = { .count = 0, .table = NULL },
++	[VEPU2_FMT_VP8E]     = { .count = ARRAY_SIZE(trans_tbl_vp8e),
++				 .table = trans_tbl_vp8e },
++	[VEPU2_FMT_JPEGE]    = { .count = ARRAY_SIZE(trans_tbl_default),
++				 .table = trans_tbl_default },
++	[VEPU2_FMT_H264E]    = { .count = ARRAY_SIZE(trans_tbl_default),
++				 .table = trans_tbl_default },
++};
++
++static void vepu2_write_req(struct rkvenc_dev *enc, u32 *reg, u32 s, u32 e,
++			    u32 reg_en)
++{
++	u32 i;
++
++	for (i = s; i < e; i++) {
++		if (i == reg_en)
++			continue;
++		rkvenc_write_relaxed(enc, i * sizeof(u32), reg[i]);
++	}
++}
++
++static void vepu2_read_req(struct rkvenc_dev *enc, u32 *reg, u32 s, u32 e)
++{
++	u32 i;
++
++	for (i = s; i < e; i++)
++		reg[i] = rkvenc_read(enc, i * sizeof(u32));
++}
++
++static int vepu2_check_req(struct mpp_request *req, u32 reg_size,
++			   u32 off_s, u32 off_e)
++{
++	if (req->offset % sizeof(u32) || req->size % sizeof(u32))
++		return -EINVAL;
++	if (req->offset < off_s || req->offset + req->size > off_e)
++		return -EINVAL;
++	if (req->offset + req->size > reg_size)
++		return -EINVAL;
++	return 0;
++}
++
++static int vepu2_extract_task_msg(struct vepu2_task *task,
++				  struct rkvenc_task_msgs *msgs)
++{
++	u32 i;
++	u32 off_s = VEPU2_REG_START_INDEX * sizeof(u32);
++	u32 off_e = (VEPU2_REG_END_INDEX + 1) * sizeof(u32);
++
++	for (i = 0; i < msgs->req_cnt; i++) {
++		struct mpp_request *req = &msgs->reqs[i];
++		int ret;
++
++		if (!req->size)
++			continue;
++
++		switch (req->cmd) {
++		case MPP_CMD_SET_REG_WRITE:
++			ret = vepu2_check_req(req, sizeof(task->reg), off_s, off_e);
++			if (ret)
++				continue;
++			if (copy_from_user((u8 *)task->reg + req->offset,
++					   req->data, req->size))
++				return -EIO;
++			memcpy(&task->w_reqs[task->w_req_cnt++], req,
++			       sizeof(*req));
++			break;
++		case MPP_CMD_SET_REG_READ:
++			ret = vepu2_check_req(req, sizeof(task->reg), off_s, off_e);
++			if (ret)
++				continue;
++			memcpy(&task->r_reqs[task->r_req_cnt++], req,
++			       sizeof(*req));
++			break;
++		case MPP_CMD_SET_REG_ADDR_OFFSET:
++			rkvenc_extract_reg_offset_info(&task->off_inf, req);
++			break;
++		default:
++			break;
++		}
++	}
++	return 0;
++}
++
++static int vepu2_process_reg_fd(struct rkvenc_session *session,
++				struct vepu2_task *task)
++{
++	int fmt = VEPU2_GET_FORMAT(task->reg[VEPU2_REG_ENC_EN_INDEX]);
++	int fd_bs;
++	int ret;
++	u32 j;
++
++	if (session->msg_flags & MPP_FLAGS_REG_NO_OFFSET)
++		fd_bs = task->reg[VEPU2_REG_OUT_INDEX];
++	else
++		fd_bs = task->reg[VEPU2_REG_OUT_INDEX] & 0x3ff;
++
++	ret = rkvenc_translate_reg_address(session, &task->mpp_task, fmt, 0,
++					   task->reg, NULL);
++	if (ret)
++		return ret;
++
++	{
++		const u16 *tbl = session->trans_count ?
++				  session->trans_table :
++				  vepu2_trans_info[fmt].table;
++		u32 cnt = session->trans_count ?
++			  session->trans_count : vepu2_trans_info[fmt].count;
++
++		for (j = 0; j < cnt; j++)
++			task->reg[tbl[j]] +=
++				rkvenc_query_reg_offset_info(&task->off_inf,
++							     tbl[j]);
++	}
++
++	task->bs_buf = rkvenc_dma_find_buffer_fd(session->dma, fd_bs);
++	task->offset_bs = rkvenc_query_reg_offset_info(&task->off_inf,
++						       VEPU2_REG_OUT_INDEX);
++	task->fmt = fmt;
++	return 0;
++}
++
++struct rkvenc_mpp_task *vepu2_alloc_task(struct rkvenc_session *session,
++					 struct rkvenc_task_msgs *msgs)
++{
++	struct vepu2_task *task;
++	struct rkvenc_mpp_task *mpp_task;
++	int ret;
++
++	task = kzalloc(sizeof(*task), GFP_KERNEL);
++	if (!task)
++		return NULL;
++
++	mpp_task = &task->mpp_task;
++	rkvenc_task_init(session, mpp_task);
++	mpp_task->hw_info = &vepu2_hw_info.hw;
++	mpp_task->reg = task->reg;
++
++	ret = vepu2_extract_task_msg(task, msgs);
++	if (ret)
++		goto fail;
++
++	if (!(msgs->flags & MPP_FLAGS_REG_FD_NO_TRANS)) {
++		ret = vepu2_process_reg_fd(session, task);
++		if (ret)
++			goto fail;
++	}
++
++	init_waitqueue_head(&mpp_task->wait);
++	kref_init(&mpp_task->ref);
++	atomic_set(&mpp_task->abort_request, 0);
++	mpp_task->task_index = atomic_inc_return(&session->mpp->task_index);
++	mpp_task->task_id = atomic_inc_return(&session->mpp->queue->task_id);
++	atomic_inc(&session->task_count);
++	atomic_inc(&session->mpp->task_count);
++
++	return mpp_task;
++
++fail:
++	rkvenc_task_finalize(session, mpp_task);
++	kfree(task);
++	return NULL;
++}
++
++int vepu2_hw_run(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task)
++{
++	struct vepu2_task *task = container_of(mpp_task, struct vepu2_task,
++					       mpp_task);
++	u32 reg_en = VEPU2_REG_ENC_EN_INDEX;
++	u32 i;
++	int ret;
++
++	ret = rkvenc_hw_run_prepare(enc);
++	if (ret)
++		return ret;
++
++	rkvenc_write_relaxed(enc, VEPU2_REG_CLR_CACHE_BASE, 1);
++
++	rkvenc_write_relaxed(enc, VEPU2_REG_ENC_EN,
++			     task->reg[reg_en] & VEPU2_FORMAT_MASK);
++
++	for (i = 0; i < task->w_req_cnt; i++) {
++		struct mpp_request *req = &task->w_reqs[i];
++		u32 s = req->offset / sizeof(u32);
++		u32 e = s + req->size / sizeof(u32);
++
++		vepu2_write_req(enc, task->reg, s, e, reg_en);
++	}
++
++	rkvenc_hw_run_commit(enc, mpp_task);
++
++	rkvenc_write(enc, VEPU2_REG_ENC_EN, task->reg[reg_en] | VEPU2_ENC_START);
++
++	return 0;
++}
++
++irqreturn_t vepu2_hw_irq(int irq, void *param)
++{
++	struct rkvenc_dev *enc = param;
++	struct rkvenc_mpp_task *mpp_task = enc->cur_task;
++	u32 irq_status;
++
++	irq_status = rkvenc_read(enc, VEPU2_REG_INT);
++	if (!(irq_status & VEPU2_INT_RAW))
++		return IRQ_NONE;
++
++	rkvenc_write(enc, VEPU2_REG_INT, 0);
++
++	if (!mpp_task)
++		return IRQ_NONE;
++
++	if (test_and_set_bit(TASK_STATE_HANDLE, &mpp_task->state)) {
++		dev_err(enc->dev, "task %d already handled\n",
++			mpp_task->task_index);
++		return IRQ_HANDLED;
++	}
++
++	cancel_delayed_work(&mpp_task->timeout_work);
++	set_bit(TASK_STATE_IRQ, &mpp_task->state);
++	enc->irq_status = irq_status;
++	mpp_task->irq_status = irq_status;
++
++	if (VEPU2_INT_ERROR_MASK & irq_status)
++		atomic_inc(&enc->reset_request);
++
++	rkvenc_iommu_dev_deactivate(enc->iommu_info, enc);
++
++	kthread_queue_work(&enc->queue->worker, &enc->work);
++
++	return IRQ_HANDLED;
++}
++
++int vepu2_hw_finish(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task)
++{
++	struct vepu2_task *task = container_of(mpp_task, struct vepu2_task,
++					       mpp_task);
++	u32 i;
++
++	for (i = 0; i < task->r_req_cnt; i++) {
++		struct mpp_request *req = &task->r_reqs[i];
++		u32 s = req->offset / sizeof(u32);
++		u32 e = s + req->size / sizeof(u32);
++
++		vepu2_read_req(enc, task->reg, s, e);
++	}
++
++	task->reg[VEPU2_REG_INT_INDEX] = mpp_task->irq_status;
++
++	if (task->bs_buf) {
++		u32 size = task->reg[VEPU2_REG_STRM_INDEX] / 8 + task->offset_bs;
++
++		rkvenc_dma_buf_sync(task->bs_buf, 0, size, DMA_FROM_DEVICE, true);
++	}
++
++	return 0;
++}
++
++int vepu2_result(struct rkvenc_session *session,
++		 struct rkvenc_mpp_task *mpp_task)
++{
++	struct vepu2_task *task = container_of(mpp_task, struct vepu2_task,
++					       mpp_task);
++	u32 i;
++
++	for (i = 0; i < task->r_req_cnt; i++) {
++		struct mpp_request *req = &task->r_reqs[i];
++
++		if (copy_to_user(req->data, (u8 *)task->reg + req->offset,
++				 req->size))
++			return -EIO;
++	}
++
++	return 0;
++}
++
++void vepu2_free_task(struct rkvenc_mpp_task *mpp_task)
++{
++	struct vepu2_task *task = container_of(mpp_task, struct vepu2_task,
++					       mpp_task);
++
++	kfree(task);
++}
++
++static int vepu2_attach_service(struct rkvenc_dev *enc)
++{
++	struct device_node *np;
++	struct platform_device *pdev;
++	struct rkvenc_service *srv;
++	struct rkvenc_taskqueue *queue;
++
++	np = of_parse_phandle(enc->dev->of_node, "rockchip,srv", 0);
++	if (!np || !of_device_is_available(np))
++		return -ENODEV;
++
++	pdev = of_find_device_by_node(np);
++	of_node_put(np);
++	if (!pdev)
++		return -ENODEV;
++
++	srv = platform_get_drvdata(pdev);
++	if (!srv)
++		return -EPROBE_DEFER;
++
++	enc->srv = srv;
++
++	queue = srv->task_queues[MPP_DEVICE_VEPU2];
++	if (!queue) {
++		dev_err(enc->dev, "no task queue for VEPU2\n");
++		return -ENODEV;
++	}
++	enc->queue = queue;
++
++	enc->core_id = 0;
++	queue->cores[0] = enc;
++	queue->core_count = 1;
++	queue->core_id_max = 0;
++	set_bit(0, &queue->core_idle);
++
++	kthread_init_work(&enc->work, rkvenc_task_worker_default);
++
++	return 0;
++}
++
++static int vepu2_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct rkvenc_dev *enc;
++	struct rkvenc_service *srv;
++	int ret;
++
++	enc = devm_kzalloc(dev, sizeof(*enc), GFP_KERNEL);
++	if (!enc)
++		return -ENOMEM;
++
++	platform_set_drvdata(pdev, enc);
++
++	ret = rkvenc_hw_probe(enc, pdev);
++	if (ret)
++		return ret;
++
++	enc->hw_info = &vepu2_hw_info;
++	enc->trans_info = vepu2_trans_info;
++
++	enc->alloc_task = vepu2_alloc_task;
++	enc->hw_run = vepu2_hw_run;
++	enc->hw_finish = vepu2_hw_finish;
++	enc->result = vepu2_result;
++	enc->free_task = vepu2_free_task;
++
++	ret = vepu2_attach_service(enc);
++	if (ret) {
++		dev_err_probe(dev, ret, "failed to attach service\n");
++		goto err_hw;
++	}
++	srv = enc->srv;
++
++	ret = devm_request_irq(dev, enc->irq, vepu2_hw_irq, IRQF_SHARED,
++			       dev_name(dev), enc);
++	if (ret) {
++		dev_err(dev, "register interrupt failed: %d\n", ret);
++		goto err_hw;
++	}
++
++	srv->sub_devices[MPP_DEVICE_VEPU2] = enc;
++	set_bit(MPP_DEVICE_VEPU2, &srv->hw_support);
++
++	dev_info(dev, "vepu2 probe success (VP8/H.264/JPEG encoder)\n");
++	return 0;
++
++err_hw:
++	rkvenc_hw_remove(enc);
++	return ret;
++}
++
++static void vepu2_remove(struct platform_device *pdev)
++{
++	struct rkvenc_dev *enc = platform_get_drvdata(pdev);
++
++	if (!enc)
++		return;
++	if (enc->srv) {
++		enc->srv->sub_devices[MPP_DEVICE_VEPU2] = NULL;
++		clear_bit(MPP_DEVICE_VEPU2, &enc->srv->hw_support);
++	}
++	rkvenc_hw_remove(enc);
++}
++
++static const struct of_device_id vepu2_dt_match[] = {
++	{ .compatible = "rockchip,rk3588-mpp-vepu2" },
++	{ },
++};
++MODULE_DEVICE_TABLE(of, vepu2_dt_match);
++
++struct platform_driver vepu2_driver = {
++	.probe = vepu2_probe,
++	.remove = vepu2_remove,
++	.driver = {
++		.name = "vepu2-mpp",
++		.of_match_table = vepu2_dt_match,
++	},
++};
+diff -ruN aa/drivers/media/platform/rockchip/rkvenc/vepu2_hw.h bb/drivers/media/platform/rockchip/rkvenc/vepu2_hw.h
+--- aa/drivers/media/platform/rockchip/rkvenc/vepu2_hw.h	1969-12-31 21:00:00.000000000 -0300
++++ bb/drivers/media/platform/rockchip/rkvenc/vepu2_hw.h	2026-08-06 20:06:15.493705452 -0300
+@@ -0,0 +1,72 @@
++/* SPDX-License-Identifier: (GPL-2.0+ OR MIT) */
++/*
++ * Copyright (C) 2023 Rockchip Electronics Co., Ltd.
++ * Copyright (C) 2026 Synkar
++ */
++#ifndef __VEPU2_HW_H
++#define __VEPU2_HW_H
++
++#include "rkvenc_hw.h"
++
++#define VEPU2_REG_NUM			184
++#define VEPU2_REG_HW_ID_INDEX		(-1)
++#define VEPU2_REG_START_INDEX		0
++#define VEPU2_REG_END_INDEX		183
++#define VEPU2_REG_OUT_INDEX		(77)
++#define VEPU2_REG_STRM_INDEX		(53)
++
++#define VEPU2_REG_ENC_EN		0x19c
++#define VEPU2_REG_ENC_EN_INDEX		(103)
++#define VEPU2_ENC_START			BIT(0)
++
++#define VEPU2_GET_FORMAT(x)		(((x) >> 4) & 0x3)
++#define VEPU2_FORMAT_MASK		(0x30)
++#define VEPU2_GET_WIDTH(x)		(((x >> 8) & 0x1ff) << 4)
++#define VEPU2_GET_HEIGHT(x)		(((x >> 20) & 0x1ff) << 4)
++
++#define VEPU2_REG_INT			0x1b4
++#define VEPU2_REG_INT_INDEX		(109)
++#define VEPU2_INT_TIMEOUT		BIT(6)
++#define VEPU2_INT_BUF_FULL		BIT(5)
++#define VEPU2_INT_BUS_ERROR		BIT(4)
++#define VEPU2_INT_RAW			BIT(0)
++#define VEPU2_INT_ERROR_MASK		(VEPU2_INT_TIMEOUT | \
++					 VEPU2_INT_BUF_FULL | \
++					 VEPU2_INT_BUS_ERROR)
++
++#define VEPU2_REG_CLR_CACHE_BASE	0xc10
++
++#define VEPU2_FMT_RESERVED		0
++#define VEPU2_FMT_VP8E			1
++#define VEPU2_FMT_JPEGE			2
++#define VEPU2_FMT_H264E			3
++
++extern struct rkvenc_hw_info vepu2_hw_info;
++extern const struct rkvenc_trans_info vepu2_trans_info[];
++
++struct vepu2_task {
++	struct rkvenc_mpp_task mpp_task;
++
++	u32 reg[VEPU2_REG_NUM];
++
++	struct mpp_request w_reqs[MPP_MAX_MSG_NUM];
++	struct mpp_request r_reqs[MPP_MAX_MSG_NUM];
++	u32 w_req_cnt;
++	u32 r_req_cnt;
++
++	struct reg_offset_info off_inf;
++
++	int fmt;
++	struct rkvenc_dma_buffer *bs_buf;
++	u32 offset_bs;
++};
++
++struct rkvenc_mpp_task *vepu2_alloc_task(struct rkvenc_session *session,
++					 struct rkvenc_task_msgs *msgs);
++int vepu2_hw_run(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task);
++int vepu2_hw_finish(struct rkvenc_dev *enc, struct rkvenc_mpp_task *mpp_task);
++int vepu2_result(struct rkvenc_session *session, struct rkvenc_mpp_task *mpp_task);
++void vepu2_free_task(struct rkvenc_mpp_task *mpp_task);
++irqreturn_t vepu2_hw_irq(int irq, void *param);
++
++#endif /* __VEPU2_HW_H */

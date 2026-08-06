@@ -2989,7 +2989,7 @@ diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_iommu.c bb/drivers/me
 diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c bb/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c
 --- aa/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c	1969-12-31 16:00:00
 +++ bb/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c	2026-02-09 17:54:57
-@@ -0,0 +1,1206 @@
+@@ -0,0 +1,1210 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Rockchip VEPU580 encoder driver - MPP service char device and ioctl dispatch
@@ -3694,13 +3694,17 @@ diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_service.c bb/drivers/
 +
 +		session->device_type = client_type;
 +
-+		/* Attach to the encoder device */
 +		if (!session->mpp) {
-+			struct rkvenc_dev *dev =
-+				session->srv->sub_devices[MPP_DEVICE_RKVENC];
++			struct rkvenc_dev *dev = NULL;
++
++			if (client_type < MPP_DEVICE_BUTT &&
++			    test_bit(client_type, &session->srv->hw_support))
++				dev = session->srv->sub_devices[client_type];
 +
 +			if (dev)
 +				rkvenc_session_attach_device(session, dev);
++			else
++				return -EINVAL;
 +		}
 +
 +		/* Init session private data */

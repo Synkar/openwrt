@@ -546,13 +546,9 @@
 	status = "okay";
 };
 
-/* Aceleradores de midia: hantro (vpu121 + vepu121_0..3) e rga sao cobertos por
- * drivers mainline (kmod-video-hantro / kmod-video-rga em DEVICE_PACKAGES) e
- * ficam habilitados. Ja o AV1 decoder (av1d, compatible rockchip,rk3588-av1-vpu)
- * NAO tem driver mainline em 6.18 (grep vazio em drivers/**.c; rkvdec so cobre
- * rk3399-vdec) -> desabilitado para nao ficar como consumidor fantasma de
- * power-domain e gerar "sync state() pending due to fdc70000.video-codec". */
 &av1d { status = "disabled"; };
+&vpu121 { status = "disabled"; };
+&vepu2 { status = "okay"; };
 
 &gpu {
 	mali-supply = <&vdd_gpu_s0>;
