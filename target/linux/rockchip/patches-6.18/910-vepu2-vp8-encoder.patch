@@ -613,7 +613,7 @@ diff -ruN aa/drivers/media/platform/rockchip/rkvenc/rkvenc_task.c bb/drivers/med
 diff -ruN aa/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c bb/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c
 --- aa/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c	1969-12-31 21:00:00.000000000 -0300
 +++ bb/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c	2026-08-06 20:06:15.493705452 -0300
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,458 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * Copyright (C) 2023 Rockchip Electronics Co., Ltd.
@@ -830,6 +830,15 @@ diff -ruN aa/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c bb/drivers/media
 +	if (ret)
 +		return ret;
 +
++	for (i = 0; i < mpp_task->mem_count; i++) {
++		struct rkvenc_mem_region *mr = &mpp_task->mem_regions[i];
++		struct rkvenc_dma_buffer *buf;
++		if (mr->is_dup || !mr->hdl)
++			continue;
++		buf = mr->hdl;
++		rkvenc_dma_buf_sync(buf, 0, buf->size, DMA_TO_DEVICE, false);
++	}
++
 +	rkvenc_write_relaxed(enc, VEPU2_REG_CLR_CACHE_BASE, 1);
 +
 +	rkvenc_write_relaxed(enc, VEPU2_REG_ENC_EN,
@@ -906,6 +915,14 @@ diff -ruN aa/drivers/media/platform/rockchip/rkvenc/vepu2_drv.c bb/drivers/media
 +		u32 size = task->reg[VEPU2_REG_STRM_INDEX] / 8 + task->offset_bs;
 +
 +		rkvenc_dma_buf_sync(task->bs_buf, 0, size, DMA_FROM_DEVICE, true);
++	}
++	for (i = 0; i < mpp_task->mem_count; i++) {
++		struct rkvenc_mem_region *mr = &mpp_task->mem_regions[i];
++		struct rkvenc_dma_buffer *buf;
++		if (mr->is_dup || !mr->hdl)
++			continue;
++		buf = mr->hdl;
++		rkvenc_dma_buf_sync(buf, 0, buf->size, DMA_BIDIRECTIONAL, true);
 +	}
 +
 +	return 0;
