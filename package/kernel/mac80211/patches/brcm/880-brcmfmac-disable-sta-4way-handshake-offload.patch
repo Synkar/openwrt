@@ -1,0 +1,38 @@
+From: Synkar <dev@synkar.com>
+Date: Tue, 11 Aug 2026 20:30:00 +0000
+Subject: [PATCH] brcmfmac: disable STA 4-way handshake / SAE offload
+
+The BCM43752 firmware (FW 18.35.387.23.146) advertises the
+NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK / STA_1X / SAE_OFFLOAD
+extended features via the BRCMF_FEAT_FWSUP capability, signalling that
+the firmware performs the 4-way handshake on its own.
+
+On the AP6275P module (BCM43752) the firmware-supplicant (FWSUP) path
+never completes the handshake against real APs: the firmware consumes
+the EAPOL-Key frames internally but the connection never reaches the
+authenticated/key-installed state from the host's perspective, so
+wpa_supplicant loops on "Authentication timed out" (reason=3,
+locally_generated=1) every ~10s and no data can flow. This reproduces
+against every AP/SSID (WPA2-PSK, WPA3-SAE, multi-vendor).
+
+Disable the STA-side FWSUP advertisement so the extended features are
+not set: wpa_supplicant then runs the 4-way handshake (and SAE) in the
+host over nl80211, which completes normally ([PTK=CCMP GTK=CCMP],
+CTRL-EVENT-CONNECTED) and the link stays up. AP-mode offload (FWAUTH)
+is left untouched since this device operates as a STA.
+
+This is a workaround: the proper fix is to identify why the firmware
+offload does not complete (suspected missing txcap_blob / NVRAM / FW
+revision mismatch vs the vendor BSP where the offload works).
+
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -7727,7 +7727,7 @@
+ 		wiphy->flags |= WIPHY_FLAG_SUPPORTS_TDLS;
+ 	if (!ifp->drvr->settings->roamoff)
+ 		wiphy->flags |= WIPHY_FLAG_SUPPORTS_FW_ROAM;
+-	if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FWSUP)) {
++	if (0 && brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FWSUP)) {
+ 		wiphy_ext_feature_set(wiphy,
+ 				      NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK);
+ 		wiphy_ext_feature_set(wiphy,
