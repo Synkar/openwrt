@@ -1,0 +1,81 @@
+From 5746f501d1ebb6cb38c1ed078d60b52e14c6d5d8 Mon Sep 17 00:00:00 2001
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Date: Mon, 17 Aug 2026 21:11:58 -0300
+Subject: [PATCH] usb: xhci-plat: skip the USB3 root hub when maximum-speed <=
+ high-speed
+
+xhci-plat always registers a shared USB3 root hub next to the USB2 one,
+even when the board declares "maximum-speed = high-speed" on the
+controller node (dwc3 passes its DT node down as sysdev). The USB3 root
+hub then keeps polling LFPS on the SuperSpeed lanes forever.
+
+That is a problem for devices like RTL8153-based USB ethernet adapters:
+once the host starts SuperSpeed polling, a failed link training parks
+the device in an SS-retry state and it never falls back to the USB2
+chirp handshake -- it only enumerates on ports where no SuperSpeed
+polling ever happens (e.g. plain USB2 ports).
+
+Honor the standard "maximum-speed" property in xhci_plat_probe: when it
+asks for less than SuperSpeed, mark the controller usb2-only so the
+shared root hub is not created (the existing single-roothub path in
+xhci_run() then registers the USB2 roothub immediately). Controllers
+without the property are unaffected.
+
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+
+diff --git a/drivers/usb/host/xhci-plat.c b/drivers/usb/host/xhci-plat.c
+index 074d9c7..48b6793 100644
+--- a/drivers/usb/host/xhci-plat.c
++++ b/drivers/usb/host/xhci-plat.c
+@@ -160,6 +160,7 @@ int xhci_plat_probe(struct platform_device *pdev, struct device *sysdev, const s
+ 	struct xhci_hcd		*xhci;
+ 	struct resource         *res;
+ 	struct usb_hcd		*hcd, *usb3_hcd;
++	enum usb_device_speed	max_speed;
+ 	int			ret;
+ 	int			irq;
+ 	struct xhci_plat_priv	*priv = NULL;
+@@ -206,6 +207,17 @@ int xhci_plat_probe(struct platform_device *pdev, struct device *sysdev, const s
+ 
+ 	xhci->allow_single_roothub = 1;
+ 
++	/*
++	 * Honor a "maximum-speed" of less-than-SuperSpeed on the (parent)
++	 * controller node: skip the shared USB3 root hub entirely so no
++	 * SuperSpeed polling ever happens on the port. Some devices (e.g.
++	 * RTL8153-based USB ethernet adapters) never fall back to high-speed
++	 * once the host starts polling LFPS on the SuperSpeed lanes.
++	 */
++	max_speed = usb_get_maximum_speed(sysdev);
++	xhci->usb2_only_roothub = max_speed != USB_SPEED_UNKNOWN &&
++				  max_speed <= USB_SPEED_HIGH;
++
+ 	/*
+ 	 * Not all platforms have clks so it is not an error if the
+ 	 * clock do not exist.
+diff --git a/drivers/usb/host/xhci.h b/drivers/usb/host/xhci.h
+index 58a51f0..a6937eb 100644
+--- a/drivers/usb/host/xhci.h
++++ b/drivers/usb/host/xhci.h
+@@ -1657,6 +1657,8 @@ struct xhci_hcd {
+ 	unsigned		broken_suspend:1;
+ 	/* Indicates that omitting hcd is supported if root hub has no ports */
+ 	unsigned		allow_single_roothub:1;
++	/* "maximum-speed" <= high-speed: register a single USB2 root hub */
++	unsigned		usb2_only_roothub:1;
+ 	/* cached extended protocol port capabilities */
+ 	struct xhci_port_cap	*port_caps;
+ 	unsigned int		num_port_caps;
+@@ -1734,7 +1736,8 @@ static inline bool xhci_hcd_is_usb3(struct usb_hcd *hcd)
+ static inline bool xhci_has_one_roothub(struct xhci_hcd *xhci)
+ {
+ 	return xhci->allow_single_roothub &&
+-	       (!xhci->usb2_rhub.num_ports || !xhci->usb3_rhub.num_ports);
++	       (xhci->usb2_only_roothub ||
++		(!xhci->usb2_rhub.num_ports || !xhci->usb3_rhub.num_ports));
+ }
+ 
+ #define xhci_dbg(xhci, fmt, args...) \
+-- 
+2.50.1
+

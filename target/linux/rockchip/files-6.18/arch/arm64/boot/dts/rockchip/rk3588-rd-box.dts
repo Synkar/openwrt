@@ -262,10 +262,13 @@
 		vin-supply = <&vcc5v0_usb>;
 	};
 
-	/* rp_power: otg-power gpio1 PA2 */
+	/* rp_power: otg-power gpio1 PA2. always-on: nenhum no consome o
+	 * VBUS; sem ele o regulador fica disabled (porta morta). */
 	vbus5v0_otg: regulator-vbus5v0-otg {
 		compatible = "regulator-fixed";
 		regulator-name = "vbus5v0_otg";
+		regulator-always-on;
+		regulator-boot-on;
 		regulator-min-microvolt = <5000000>;
 		regulator-max-microvolt = <5000000>;
 		enable-active-high;
@@ -1229,11 +1232,15 @@
 
 &usb_host0_xhci {
 	dr_mode = "host";
+	snps,parkmode-disable-hs-quirk;
+	snps,parkmode-disable-ss-quirk;
 	status = "okay";
 };
 
 &usb_host1_xhci {
 	dr_mode = "host";
+	snps,parkmode-disable-hs-quirk;
+	snps,parkmode-disable-ss-quirk;
 	status = "okay";
 };
 
