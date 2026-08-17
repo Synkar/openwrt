@@ -1,0 +1,66 @@
+From bbfad76bfc188cc0faeaadf5e10b090ae38bc6ce Mon Sep 17 00:00:00 2001
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Date: Thu, 13 Aug 2026 14:47:13 -0300
+Subject: [PATCH] usb: hub: cancel pending init delayed work on quiesce
+
+hub->init_work drives the multi-stage HUB_INIT2/HUB_INIT3 activation
+sequence (queued by HUB_INIT in hub_configure). It is the only delayed
+work tied to hub activation that hub_quiesce() does not stop: the irq
+retry timer, the post-resume work, the status URB and the indicator/
+TT works are all cancelled/flushed there, but a pending init_work is
+left armed.
+
+When a hub is reset while init_work is still pending (most likely when
+HUB_SET_DEPTH times out during hub_configure -- the 5 s
+USB_CTRL_SET_TIMEOUT pushes HUB_INIT, and thus the init_work queueing,
+late -- and a reset follows before the congested system_power_efficient
+workqueue dispatches it), the sequence is:
+
+  1. hub_pre_reset() -> hub_quiesce(): kills the status URB, but
+     init_work stays pending.
+  2. hub_post_reset() -> hub_activate(HUB_POST_RESET): re-submits the
+     status URB at the init3 label.
+  3. the stale init_work finally runs hub_activate(HUB_INIT2/3), reaches
+     init3 and submits the status URB again -> usb_submit_urb() rejects
+     it with -EBUSY and fires the "URB submitted while active"
+     WARN_ONCE, followed by "hub X: activate --> -16".
+
+The hub keeps working (the URB submitted by HUB_POST_RESET keeps
+cycling through hub_irq), but the warning is noisy and, under
+panic_on_warn, fatal.
+
+Cancel init_work in hub_quiesce() so it cannot fire after the hub has
+been quiesced and re-activated by HUB_POST_RESET / HUB_RESUME. Use
+cancel_delayed_work() (not _sync) deliberately: hub_pre_reset() runs
+under device_lock(&hdev->dev) (usb_lock_device == device_lock), which
+hub_activate(HUB_INIT2/3) also acquires, so a _sync variant would
+deadlock if init_work were blocked on that lock. The non-sync cancel
+drops a still-pending work (the common case, matching the race above)
+without waiting; a concurrently running init_work is left to finish and
+is naturally quiesced together with the status URB.
+
+This is the symmetric counterpart to the existing cancellation of
+hub->post_resume_work/leds/irq_urb_retry in hub_quiesce() and does not
+touch the overloaded init_work scheduling that commit 9bd9c8026341
+("usb: hub: Fix flushing of delayed work used for post resume
+purposes") deliberately moved away from for the post-resume path.
+
+Not yet upstream.
+
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+
+diff --git a/drivers/usb/core/hub.c b/drivers/usb/core/hub.c
+index 256fe8c..baecdd4 100644
+--- a/drivers/usb/core/hub.c
++++ b/drivers/usb/core/hub.c
+@@ -1413,6 +1413,7 @@ static void hub_quiesce(struct usb_hub *hub, enum hub_quiescing_type type)
+ 	/* Stop hub_wq and related activity */
+ 	timer_delete_sync(&hub->irq_urb_retry);
+ 	flush_delayed_work(&hub->post_resume_work);
++	cancel_delayed_work(&hub->init_work);
+ 	usb_kill_urb(hub->urb);
+ 	if (hub->has_indicators)
+ 		cancel_delayed_work_sync(&hub->leds);
+-- 
+2.50.1
+
