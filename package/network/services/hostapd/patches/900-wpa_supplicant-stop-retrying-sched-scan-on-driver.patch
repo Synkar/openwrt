@@ -1,45 +1,56 @@
-From 8f499c4b7bc719d1d04c5e8ede8dafdabbdc36b2 Mon Sep 17 00:00:00 2001
+From 22a68b4305894c18fc77507c7ef09112e26a2060 Mon Sep 17 00:00:00 2001
 From: Synkar <dev@synkar.com>
-Date: Mon, 31 Aug 2026 22:21:36 -0300
-Subject: [PATCH] wpa_supplicant: stop retrying sched scan when the driver
- rejects it
+Date: Mon, 31 Aug 2026 23:30:01 -0300
+Subject: [PATCH] wpa_supplicant: stop retrying sched scan on persistent driver
+ rejection
 
 hostap 2026-07 drives background station scanning through scheduled
-scans whenever the driver advertises max_sched_scan_ssids. brcmfmac
-implements scheduled scans exclusively as firmware PNO and rejects any
-request without match sets (n_match_sets == 0 -> -EINVAL), which is
-exactly what the wildcard background scan sends. Whenever the STA is
-disconnected and the configured SSID is not visible, this produces an
-endless "Failed to initiate sched scan" warning loop, one per scan
-cycle (~every 4 s, ~20k lines/day into the persistent system log).
-Each attempt falls back to a normal scan, so connectivity keeps
-working and only the log is polluted.
+scans whenever the driver advertises max_sched_scan_ssids. On
+brcmfmac (AP6275P/BCM43752) every wildcard background-scan attempt is
+rejected and wpa_supplicant retries forever, producing an endless
+"Failed to initiate sched scan" warning loop, one per scan cycle
+(~every 4 s, ~20k lines/day into the persistent system log) whenever
+the STA is disconnected and the configured SSID is not visible. Each
+attempt falls back to a normal scan, so connectivity keeps working
+and only the log is polluted.
 
-Latch the failure: when the driver rejects the wildcard scheduled scan
-with -EINVAL/-EOPNOTSUPP, clear wpa_s->max_sched_scan_ssids so that
+brcmfmac implements scheduled scans exclusively as firmware PNO and
+rejects requests without match sets (n_match_sets == 0 -> -EINVAL),
+which is exactly what the wildcard background scan sends; the nl80211
+wrapper also maps pre-send build failures to plain -1, so a specific
+errno cannot be relied upon.
+
+Latch the failure: on any sched-scan error other than the transient
+-EAGAIN/-EBUSY/-EALREADY, clear wpa_s->max_sched_scan_ssids so that
 wpa_supplicant_req_sched_scan() bails out immediately on subsequent
 cycles and the background scan loop goes straight to normal scans
-without logging. Match-set based PNO (control interface) is not used
-on OpenWrt and gets disabled as well once the latch triggers.
+without logging. The warning now includes the errno for diagnostics.
+Match-set based PNO (control interface) is not used on OpenWrt and
+gets disabled as well once the latch triggers.
 
 diff --git a/wpa_supplicant/scan.c b/wpa_supplicant/scan.c
-index edd5167..eba9034 100644
+index edd5167..ccf6014 100644
 --- a/wpa_supplicant/scan.c
 +++ b/wpa_supplicant/scan.c
-@@ -1948,6 +1948,18 @@ scan:
+@@ -1947,7 +1947,22 @@ scan:
+ 	os_free(params.filter_ssids);
  	os_free(params.mac_addr);
  	if (ret) {
- 		wpa_msg(wpa_s, MSG_WARNING, "Failed to initiate sched scan");
-+		if (ret == -EINVAL || ret == -EOPNOTSUPP) {
+-		wpa_msg(wpa_s, MSG_WARNING, "Failed to initiate sched scan");
++		wpa_msg(wpa_s, MSG_WARNING, "Failed to initiate sched scan: %d", ret);
++		if (ret != -EAGAIN && ret != -EBUSY && ret != -EALREADY) {
 +			/*
-+			 * The driver rejected a wildcard scheduled scan: e.g. brcmfmac
-+			 * implements scheduled scans as firmware PNO and requires at
-+			 * least one match set, which background scans do not carry.
-+			 * Remember this and stop wasting cycles on scheduled scans;
-+			 * the background scan loop falls back to normal scans.
++			 * The driver rejected a wildcard scheduled scan: e.g.
++			 * brcmfmac implements scheduled scans as firmware PNO
++			 * and requires at least one match set, which background
++			 * scans do not carry. Do not keep retrying scheduled
++			 * scans; the background scan loop falls back to normal
++			 * scans. Transient errors (-EAGAIN/-EBUSY/-EALREADY)
++			 * keep the retry behaviour.
 +			 */
 +			wpa_printf(MSG_INFO,
-+				   "Driver rejected wildcard sched scan - disabling sched scan");
++				   "Driver rejected wildcard sched scan (ret=%d) - disabling sched scan offload",
++				   ret);
 +			wpa_s->max_sched_scan_ssids = 0;
 +		}
  		if (prev_state != wpa_s->wpa_state)
