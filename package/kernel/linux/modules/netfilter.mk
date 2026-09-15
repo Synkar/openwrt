@@ -57,7 +57,6 @@ define KernelPackage/iptables
   TITLE:=Iptables legacy
   KCONFIG:= \
 	CONFIG_IP_NF_IPTABLES_LEGACY \
-	CONFIG_NETFILTER_XTABLES \
 	CONFIG_NETFILTER_XTABLES_LEGACY=y \
 	CONFIG_IP6_NF_IPTABLES_LEGACY \
 	CONFIG_BRIDGE_NF_EBTABLES_LEGACY
@@ -75,7 +74,7 @@ $(eval $(call KernelPackage,iptables))
 define KernelPackage/nf-ipt
   SUBMENU:=$(NF_MENU)
   TITLE:=Iptables core
-  KCONFIG:=$(KCONFIG_NF_IPT)
+  KCONFIG:=CONFIG_IP_NF_IPTABLES $(KCONFIG_NF_IPT)
   DEPENDS:=+!LINUX_6_12:kmod-iptables
   FILES:=$(foreach mod,$(NF_IPT-m),$(LINUX_DIR)/net/$(mod).ko)
   AUTOLOAD:=$(call AutoProbe,$(notdir $(NF_IPT-m)))
@@ -87,7 +86,7 @@ $(eval $(call KernelPackage,nf-ipt))
 define KernelPackage/nf-ipt6
   SUBMENU:=$(NF_MENU)
   TITLE:=Ip6tables core
-  KCONFIG:=$(KCONFIG_NF_IPT6)
+  KCONFIG:=CONFIG_IP6_NF_IPTABLES $(KCONFIG_NF_IPT6)
   FILES:=$(foreach mod,$(NF_IPT6-m),$(LINUX_DIR)/net/$(mod).ko)
   AUTOLOAD:=$(call AutoProbe,$(notdir $(NF_IPT6-m)))
   DEPENDS:=+kmod-nf-ipt +kmod-nf-log6
