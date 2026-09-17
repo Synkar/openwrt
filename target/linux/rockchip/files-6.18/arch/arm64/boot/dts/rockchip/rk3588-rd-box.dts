@@ -687,6 +687,13 @@
 	};
 };
 
+/* i2c3 habilitado vazio */
+&i2c3 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c3m0_xfer>;
+	status = "okay";
+};
+
 /* RTC hym8563 no i2c4 (rd-box-rk3588.dts) */
 &i2c4 {
 	pinctrl-names = "default";
