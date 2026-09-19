@@ -322,7 +322,7 @@
 		resets = <&cru SRST_CAN0>, <&cru SRST_P_CAN0>;
 		reset-names = "can", "can-apb";
 		assigned-clocks = <&cru CLK_CAN0>;
-		assigned-clock-rates = <200000000>;
+		assigned-clock-rates = <300000000>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&can0m0_pins>;
 		status = "okay";
@@ -687,10 +687,11 @@
 	};
 };
 
-/* i2c3 habilitado vazio */
+/* i2c3 habilitado vazio; 400 kHz para o BNO080 em userspace. */
 &i2c3 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c3m0_xfer>;
+	clock-frequency = <400000>;
 	status = "okay";
 };
 
@@ -1330,7 +1331,7 @@
 	};
 };
 
-/* rp_power: usb-hub-reset gpio3 PB2 -> deassert high no boot */
+/* rp_power: usb-hub-reset gpio3 PB2 -> deassert high no boot. */
 &gpio3 {
 	usb-hub-reset-hog {
 		gpio-hog;
