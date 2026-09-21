@@ -149,9 +149,9 @@ index 8d84877..af214ae 100644
 +		u64_stats_inc(&rkcanfd_stats->tx_watchdog_flushed);
 +		u64_stats_update_end(&rkcanfd_stats->syncp);
 +
-+		netdev_info(priv->ndev,
-+			    "TX watchdog: flushed stuck echo slot %u (tx_head=0x%08x tx_tail=0x%08x)\n",
-+			    tx_tail, priv->tx_head, priv->tx_tail);
++		netdev_dbg(priv->ndev,
++			   "TX watchdog: flushed stuck echo slot %u (tx_head=0x%08x tx_tail=0x%08x)\n",
++			   tx_tail, priv->tx_head, priv->tx_tail);
 +	}
 +
 +	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
