@@ -343,6 +343,13 @@
 		/* can1m0 conflita com gmac1_txen (gpio3 RK_PB5); ver comentario acima. */
 		status = "disabled";
 	};
+
+	spican_osc: spican_osc {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <8000000>;
+	};
+
 };
 
 &cpu_b0 {
@@ -1139,20 +1146,29 @@
 	};
 };
 
-/* spi0: spidev (rd-box-rk3588.dts) */
+/* spi0: 2x MCP2515 (CS0 nativo, CS1 gpio3_C7; INT gpio3_C4/gpio3_C5) */
 &spi0 {
 	pinctrl-names = "default";
-	pinctrl-0 = <&spi0m3_cs0 &spi0m3_pins>;
-	num-cs = <1>;
+	pinctrl-0 = <&spi0m3_cs0 &spi0m3_pins &spi0_extra_gpios &spican_int_pins>;
+	cs-gpios = <0>, <&gpio3 RK_PC7 GPIO_ACTIVE_LOW>;
 	status = "okay";
 
-	spidev@0 {
-		/* "rohm,dh2228fv" é o id canônico do binding spidev mainline
-		 * (o driver recusa "rockchip,spidev" / "spidev" direto). */
-		compatible = "rohm,dh2228fv";
+	spican0: can@0 {
+		compatible = "microchip,mcp2515";
 		reg = <0>;
-		spi-max-frequency = <12000000>;
-		spi-lsb-first;
+		spi-max-frequency = <10000000>;
+		clocks = <&spican_osc>;
+		interrupt-parent = <&gpio3>;
+		interrupts = <RK_PC4 IRQ_TYPE_EDGE_FALLING>;
+	};
+
+	spican1: can@1 {
+		compatible = "microchip,mcp2515";
+		reg = <1>;
+		spi-max-frequency = <10000000>;
+		clocks = <&spican_osc>;
+		interrupt-parent = <&gpio3>;
+		interrupts = <RK_PC5 IRQ_TYPE_EDGE_FALLING>;
 	};
 };
 
@@ -1327,6 +1343,18 @@
 
 		modem4g_en: modem4g-en {
 			rockchip,pins = <4 RK_PA4 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+
+	spi0_custom_cs {
+		spi0_extra_gpios: spi0-extra-gpios {
+			rockchip,pins = <3 RK_PC7 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+
+		spican_int_pins: spican-int-pins {
+			rockchip,pins =
+				<3 RK_PC4 RK_FUNC_GPIO &pcfg_pull_up>,
+				<3 RK_PC5 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 };
