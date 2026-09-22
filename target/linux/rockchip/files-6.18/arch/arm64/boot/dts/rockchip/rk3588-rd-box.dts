@@ -1146,11 +1146,19 @@
 	};
 };
 
-/* spi0: 2x MCP2515 */
+/* spi0 M3: dois MCP2515 no mesmo barramento.
+ * CLK GPIO3_D3, MISO GPIO3_D1, MOSI GPIO3_D2 (grupo spi0m3_pins).
+ * CS0 nativo GPIO3_D4 (spi0m3_cs0): placa de acessório, bitrate 500 kbit/s.
+ * CS1 em GPIO GPIO3_C7: IMU, bitrate 500 kbit/s.
+ * 1 Mbit/s não cabe: o MCP2515 divide o cristal de 8 MHz por 2.
+ * GPIO3_D5 é spi0_cs1_m3 no pinctrl do SoC; aqui fica como INT do acessório,
+ * então spi0m3_cs1 não entra no pinctrl.
+ * Cristal dos dois módulos: spican_osc = 8 MHz. */
 &spi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi0m3_cs0 &spi0m3_pins &spi0_extra_gpios &spican_int_pins>;
 	cs-gpios = <0>, <&gpio3 RK_PC7 GPIO_ACTIVE_LOW>;
+	num-cs = <2>;
 	status = "okay";
 
 	spican0: can@0 {
@@ -1159,7 +1167,7 @@
 		spi-max-frequency = <10000000>;
 		clocks = <&spican_osc>;
 		interrupt-parent = <&gpio3>;
-		interrupts = <RK_PC4 IRQ_TYPE_EDGE_FALLING>;
+		interrupts = <RK_PD5 IRQ_TYPE_EDGE_FALLING>;
 	};
 
 	spican1: can@1 {
@@ -1167,8 +1175,8 @@
 		reg = <1>;
 		spi-max-frequency = <10000000>;
 		clocks = <&spican_osc>;
-		interrupt-parent = <&gpio3>;
-		interrupts = <RK_PC5 IRQ_TYPE_EDGE_FALLING>;
+		interrupt-parent = <&gpio4>;
+		interrupts = <RK_PB2 IRQ_TYPE_EDGE_FALLING>;
 	};
 };
 
