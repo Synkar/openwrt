@@ -1,0 +1,7 @@
+part uuid ${devtype} ${devnum}:2 uuid
+
+setenv bootargs "console=tty0 root=PARTUUID=${uuid} rw rootwait";
+
+load ${devtype} ${devnum}:1 ${kernel_addr_r} kernel.img
+
+bootm ${kernel_addr_r}
