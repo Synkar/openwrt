@@ -1146,7 +1146,7 @@
 	};
 };
 
-/* spi0: 2x MCP2515 (CS0 nativo, CS1 gpio3_C7; INT gpio3_C4/gpio3_C5) */
+/* spi0: 2x MCP2515 */
 &spi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi0m3_cs0 &spi0m3_pins &spi0_extra_gpios &spican_int_pins>;
