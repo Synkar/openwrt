@@ -1,0 +1,415 @@
+From e4a52f2357572e6820ed9cc55a7696a8f3a158bf Mon Sep 17 00:00:00 2001
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Date: Fri, 25 Sep 2026 09:53:29 -0300
+Subject: [PATCH] can: rockchip_canfd: complete TX via TX_FINISH_INT, add TX
+ watchdog
+
+TX completion in this driver is derived from the RXSTX self-echo: the
+transmitted frame is looped back into the 2-entry RX FIFO (which runs
+in COVER mode, i.e. overwrite-oldest when full) and matched against
+echo_skb[tx_tail] by can_id/len/data. Under sustained bus load
+(~400 fps) with IRQ latency spikes, the echo gets overwritten in the
+FIFO before it is read: tx_tail never advances, both TX slots hang
+and the netdev queue stalls. The controller shows CMD TX_REQ clear
+and STATE idle - the frame was transmitted, only the echo was lost.
+
+Rework TX completion the way other CAN drivers do it:
+
+- Unmask TX_FINISH_INT in normal mode and complete echo slots from
+  the IRQ handler by checking the per-slot TX_REQ bits in CMD: a
+  cleared REQ bit for the oldest pending slot means the frame was
+  transmitted successfully.
+- Do not enable RXSTX_MODE in normal mode (keep it for loopback,
+  where the self-echo is the delivery mechanism): the RX FIFO now
+  carries only received frames, halving its pressure. Gate
+  rkcanfd_rxstx_filter() to loopback so received frames are never
+  consumed as echoes in normal mode.
+- Keep a TX watchdog as safety net: a delayed work force-completes
+  a pending slot older than 50 ms when the controller TX side is
+  idle (no TX_REQ, TX buffer not full, not transmitting). It also
+  resynchronizes after RX FIFO overflow (tx_desync flag + immediate
+  kick) and logs the stuck frame (can_id/len/data) plus controller
+  registers (STATE/CMD/INT/RX_FIFO_CTRL) for diagnostics, exposed
+  via the tx_watchdog_flushed ethtool counter.
+
+Validated on an rk3588 board against a busy robot CAN bus: repeated
+controller reflashing (~8k frames per run) completes with zero
+stalls; with the controller off the bus (no ACK) completion is
+correctly withheld and the watchdog drains the queue instead of
+hanging forever.
+
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-core.c b/drivers/net/can/rockchip/rockchip_canfd-core.c
+index cc82963..6207584 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-core.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c
+@@ -268,11 +268,11 @@ static void rkcanfd_chip_start(struct rkcanfd_priv *priv)
+ 		RKCANFD_REG_MODE_CAN_FD_MODE_ENABLE |
+ 		RKCANFD_REG_MODE_AUTO_RETX_MODE |
+ 		RKCANFD_REG_MODE_COVER_MODE |
+-		RKCANFD_REG_MODE_RXSTX_MODE |
+ 		RKCANFD_REG_MODE_WORK_MODE;
+ 
+ 	if (priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK)
+-		priv->reg_mode_default |= RKCANFD_REG_MODE_LBACK_MODE |
++		priv->reg_mode_default |= RKCANFD_REG_MODE_RXSTX_MODE |
++			RKCANFD_REG_MODE_LBACK_MODE |
+ 			RKCANFD_REG_MODE_SILENT_MODE |
+ 			RKCANFD_REG_MODE_SELF_TEST;
+ 
+@@ -285,8 +285,14 @@ static void rkcanfd_chip_start(struct rkcanfd_priv *priv)
+ 	priv->reg_int_mask_default =
+ 		RKCANFD_REG_INT_TIMESTAMP_COUNTER_OVERFLOW_INT |
+ 		RKCANFD_REG_INT_TX_ARBIT_FAIL_INT |
+-		RKCANFD_REG_INT_OVERLOAD_INT |
+-		RKCANFD_REG_INT_TX_FINISH_INT;
++		RKCANFD_REG_INT_OVERLOAD_INT;
++
++	if (priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK) {
++		/* In loopback mode TX completion is driven by the
++		 * self-received echo (RXSTX), mask TX_FINISH.
++		 */
++		priv->reg_int_mask_default |= RKCANFD_REG_INT_TX_FINISH_INT;
++	}
+ 
+ 	/* Do not mask the bus error interrupt if the bus error
+ 	 * reporting is requested.
+@@ -324,6 +330,7 @@ static void rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state st
+ 	priv->can.state = state;
+ 
+ 	rkcanfd_timestamp_stop(priv);
++	cancel_delayed_work(&priv->tx_watchdog);
+ 	__rkcanfd_chip_stop(priv, state);
+ }
+ 
+@@ -332,6 +339,7 @@ static void rkcanfd_chip_stop_sync(struct rkcanfd_priv *priv, const enum can_sta
+ 	priv->can.state = state;
+ 
+ 	rkcanfd_timestamp_stop_sync(priv);
++	cancel_delayed_work_sync(&priv->tx_watchdog);
+ 	__rkcanfd_chip_stop(priv, state);
+ }
+ 
+@@ -614,6 +622,9 @@ rkcanfd_handle_rx_fifo_overflow_int(struct rkcanfd_priv *priv)
+ 	stats->rx_over_errors++;
+ 	stats->rx_errors++;
+ 
++	WRITE_ONCE(priv->tx_desync, true);
++	mod_delayed_work(system_wq, &priv->tx_watchdog, 0);
++
+ 	netdev_dbg(priv->ndev, "RX-FIFO overflow\n");
+ 
+ 	skb = rkcanfd_alloc_can_err_skb(priv, &cf, &timestamp);
+@@ -666,6 +677,9 @@ static irqreturn_t rkcanfd_irq(int irq, void *dev_id)
+ 	if (reg_int & RKCANFD_REG_INT_RX_FINISH_INT)
+ 		rkcanfd_handle(priv, rx_int);
+ 
++	if (reg_int & RKCANFD_REG_INT_TX_FINISH_INT)
++		rkcanfd_handle(priv, tx_finish_int);
++
+ 	if (reg_int & RKCANFD_REG_INT_ERROR_INT)
+ 		rkcanfd_handle(priv, error_int);
+ 
+@@ -680,7 +694,8 @@ static irqreturn_t rkcanfd_irq(int irq, void *dev_id)
+ 
+ 	if (reg_int & ~(RKCANFD_REG_INT_ALL_ERROR |
+ 			RKCANFD_REG_INT_RX_FIFO_OVERFLOW_INT |
+-			RKCANFD_REG_INT_RX_FINISH_INT))
++			RKCANFD_REG_INT_RX_FINISH_INT |
++			RKCANFD_REG_INT_TX_FINISH_INT))
+ 		netdev_err(priv->ndev, "%s: int=0x%08x\n", __func__, reg_int);
+ 
+ 	if (reg_int & RKCANFD_REG_INT_WAKEUP_INT)
+@@ -906,6 +921,7 @@ static int rkcanfd_probe(struct platform_device *pdev)
+ 	priv->can.do_get_berr_counter = rkcanfd_get_berr_counter;
+ 	priv->ndev = ndev;
+ 	raw_spin_lock_init(&priv->tx_lock);
++	rkcanfd_tx_watchdog_init(priv);
+ 
+ 	match = device_get_match_data(&pdev->dev);
+ 	if (match) {
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-ethtool.c b/drivers/net/can/rockchip/rockchip_canfd-ethtool.c
+index 5aeeef6..6024cc1 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-ethtool.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-ethtool.c
+@@ -11,11 +11,13 @@
+ enum rkcanfd_stats_type {
+ 	RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS,
+ 	RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS,
++	RKCANFD_STATS_TYPE_TX_WATCHDOG_FLUSHED,
+ };
+ 
+ static const char rkcanfd_stats_strings[][ETH_GSTRING_LEN] = {
+ 	[RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS] = "rx_fifo_empty_errors",
+ 	[RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS] = "tx_extended_as_standard_errors",
++	[RKCANFD_STATS_TYPE_TX_WATCHDOG_FLUSHED] = "tx_watchdog_flushed",
+ };
+ 
+ static void
+@@ -55,6 +57,8 @@ rkcanfd_ethtool_get_ethtool_stats(struct net_device *ndev,
+ 			u64_stats_read(&rkcanfd_stats->rx_fifo_empty_errors);
+ 		data[RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS] =
+ 			u64_stats_read(&rkcanfd_stats->tx_extended_as_standard_errors);
++		data[RKCANFD_STATS_TYPE_TX_WATCHDOG_FLUSHED] =
++			u64_stats_read(&rkcanfd_stats->tx_watchdog_flushed);
+ 	} while (u64_stats_fetch_retry(&rkcanfd_stats->syncp, start));
+ }
+ 
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-rx.c b/drivers/net/can/rockchip/rockchip_canfd-rx.c
+index ff940ea..f8f94c3 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-rx.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-rx.c
+@@ -252,7 +252,8 @@ static int rkcanfd_handle_rx_int_one(struct rkcanfd_priv *priv)
+ 		return 0;
+ 	}
+ 
+-	if (rkcanfd_get_tx_pending(priv)) {
++	if ((priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK) &&
++	    rkcanfd_get_tx_pending(priv)) {
+ 		bool tx_done = false;
+ 
+ 		err = rkcanfd_rxstx_filter(priv, cfd, header->ts, &tx_done);
+@@ -310,5 +311,7 @@ int rkcanfd_handle_rx_int(struct rkcanfd_priv *priv)
+ 			return err;
+ 	}
+ 
++	rkcanfd_tx_watchdog_check(priv);
++
+ 	return 0;
+ }
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-tx.c b/drivers/net/can/rockchip/rockchip_canfd-tx.c
+index 8d84877..5e110c1 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-tx.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-tx.c
+@@ -4,6 +4,8 @@
+ //               Marc Kleine-Budde <kernel@pengutronix.de>
+ //
+ 
++#include <linux/jiffies.h>
++#include <linux/workqueue.h>
+ #include <net/netdev_queues.h>
+ 
+ #include "rockchip_canfd.h"
+@@ -76,6 +78,112 @@ void rkcanfd_xmit_retry(struct rkcanfd_priv *priv)
+ 	rkcanfd_start_xmit_write_cmd(priv, reg_cmd);
+ }
+ 
++/* Force-complete a pending echo whose RXSTX echo was lost: with the
++ * controller TX side idle the frame is gone from the hardware and the
++ * echo will never arrive.
++ */
++void rkcanfd_tx_watchdog_check(struct rkcanfd_priv *priv)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	struct rkcanfd_stats *rkcanfd_stats = &priv->stats;
++	unsigned int flushed_pkts = 0, flushed_bytes = 0;
++	bool flush_all, was_desync;
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&priv->tx_lock, flags);
++
++	flush_all = READ_ONCE(priv->tx_desync);
++	if (flush_all)
++		WRITE_ONCE(priv->tx_desync, false);
++	was_desync = flush_all;
++
++	while (rkcanfd_get_tx_pending(priv)) {
++		const unsigned int tx_tail = rkcanfd_get_tx_tail(priv);
++		unsigned int frame_len = 0;
++		u32 reg_cmd, reg_state;
++
++		if (!flush_all &&
++		    time_before(jiffies,
++				priv->tx_submit[tx_tail] + priv->tx_watchdog_delay))
++			break;
++
++		reg_cmd = rkcanfd_read(priv, RKCANFD_REG_CMD);
++		reg_state = rkcanfd_read(priv, RKCANFD_REG_STATE);
++		if ((reg_cmd & RKCANFD_REG_CMD_TX_REQ(tx_tail)) ||
++		    (reg_state & (RKCANFD_REG_STATE_TX_BUFFER_FULL |
++				  RKCANFD_REG_STATE_TX_PERIOD)))
++			break;
++
++		{
++			struct sk_buff *skb = priv->can.echo_skb[tx_tail];
++			struct canfd_frame *cfd = skb ?
++				(struct canfd_frame *)skb->data : NULL;
++			char data_str[CANFD_MAX_DLEN * 3 + 1] = "";
++			unsigned int i, dlen;
++			u32 can_id = 0;
++
++			if (cfd) {
++				can_id = cfd->can_id & CAN_EFF_MASK;
++				dlen = min(cfd->len, 8U);
++				for (i = 0; i < dlen; i++)
++					sprintf(data_str + i * 3, "%02x ",
++						cfd->data[i]);
++			}
++
++			can_free_echo_skb(priv->ndev, tx_tail, &frame_len);
++			WRITE_ONCE(priv->tx_tail, priv->tx_tail + 1);
++
++			stats->tx_bytes += frame_len;
++			stats->tx_packets++;
++			flushed_pkts++;
++			flushed_bytes += frame_len;
++
++			u64_stats_update_begin(&rkcanfd_stats->syncp);
++			u64_stats_inc(&rkcanfd_stats->tx_watchdog_flushed);
++			u64_stats_update_end(&rkcanfd_stats->syncp);
++
++			flush_all = true;
++
++			netdev_info(priv->ndev,
++				    "TX watchdog: flushed stuck echo slot %u desync=%u can_id=%03x len=%u data=%sstate=0x%08x cmd=0x%08x int=0x%08x rxfifo=0x%08x(cnt=%u) (tx_head=0x%08x tx_tail=0x%08x)\n",
++				    tx_tail, was_desync, can_id,
++				    cfd ? cfd->len : 0, data_str,
++				    reg_state, reg_cmd,
++				    rkcanfd_read(priv, RKCANFD_REG_INT),
++				    rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL),
++				    (rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL) >>
++				     4) & 0x7,
++				    priv->tx_head, priv->tx_tail);
++			continue;
++		}
++	}
++
++	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
++
++	if (flushed_pkts)
++		netif_subqueue_completed_wake(priv->ndev, 0, flushed_pkts,
++					      flushed_bytes,
++					      rkcanfd_get_effective_tx_free(priv),
++					      RKCANFD_TX_START_THRESHOLD);
++}
++
++static void rkcanfd_tx_watchdog_work(struct work_struct *work)
++{
++	struct rkcanfd_priv *priv = container_of(to_delayed_work(work),
++						 struct rkcanfd_priv, tx_watchdog);
++
++	rkcanfd_tx_watchdog_check(priv);
++
++	if (rkcanfd_get_tx_pending(priv))
++		schedule_delayed_work(&priv->tx_watchdog, priv->tx_watchdog_delay);
++}
++
++void rkcanfd_tx_watchdog_init(struct rkcanfd_priv *priv)
++{
++	priv->tx_watchdog_delay = msecs_to_jiffies(RKCANFD_TX_WATCHDOG_TIMEOUT_MS);
++	INIT_DELAYED_WORK(&priv->tx_watchdog, rkcanfd_tx_watchdog_work);
++}
++
+ netdev_tx_t rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev)
+ {
+ 	struct rkcanfd_priv *priv = netdev_priv(ndev);
+@@ -99,6 +207,8 @@ netdev_tx_t rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev)
+ 				    priv->tx_head, priv->tx_tail,
+ 				    rkcanfd_get_tx_pending(priv));
+ 
++		rkcanfd_tx_watchdog_check(priv);
++
+ 		return NETDEV_TX_BUSY;
+ 	}
+ 
+@@ -151,6 +261,7 @@ netdev_tx_t rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev)
+ 	netdev_sent_queue(priv->ndev, frame_len);
+ 
+ 	WRITE_ONCE(priv->tx_head, priv->tx_head + 1);
++	priv->tx_submit[tx_head] = jiffies;
+ 
+ 	rkcanfd_start_xmit_write_cmd(priv, reg_cmd);
+ 	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
+@@ -160,6 +271,9 @@ netdev_tx_t rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev)
+ 				  RKCANFD_TX_STOP_THRESHOLD,
+ 				  RKCANFD_TX_START_THRESHOLD);
+ 
++	if (rkcanfd_get_tx_pending(priv))
++		schedule_delayed_work(&priv->tx_watchdog, priv->tx_watchdog_delay);
++
+ 	return NETDEV_TX_OK;
+ }
+ 
+@@ -190,3 +304,36 @@ void rkcanfd_handle_tx_done_one(struct rkcanfd_priv *priv, const u32 ts,
+ 							    frame_len_p);
+ 	stats->tx_packets++;
+ }
++
++int rkcanfd_handle_tx_finish_int(struct rkcanfd_priv *priv)
++{
++	unsigned int completed_pkts = 0, completed_bytes = 0;
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&priv->tx_lock, flags);
++
++	while (rkcanfd_get_tx_pending(priv)) {
++		const unsigned int tx_tail = rkcanfd_get_tx_tail(priv);
++		u32 reg_cmd;
++		unsigned int frame_len = 0;
++
++		reg_cmd = rkcanfd_read(priv, RKCANFD_REG_CMD);
++		if (reg_cmd & RKCANFD_REG_CMD_TX_REQ(tx_tail))
++			break;
++
++		rkcanfd_handle_tx_done_one(priv, 0, &frame_len);
++		WRITE_ONCE(priv->tx_tail, priv->tx_tail + 1);
++		completed_pkts++;
++		completed_bytes += frame_len;
++	}
++
++	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
++
++	if (completed_pkts)
++		netif_subqueue_completed_wake(priv->ndev, 0, completed_pkts,
++					      completed_bytes,
++					      rkcanfd_get_effective_tx_free(priv),
++					      RKCANFD_TX_START_THRESHOLD);
++
++	return 0;
++}
+diff --git a/drivers/net/can/rockchip/rockchip_canfd.h b/drivers/net/can/rockchip/rockchip_canfd.h
+index ad65fad..07c345e 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd.h
++++ b/drivers/net/can/rockchip/rockchip_canfd.h
+@@ -297,6 +297,8 @@
+ #define RKCANFD_TIMESTAMP_WORK_MAX_DELAY_SEC 60
+ #define RKCANFD_ERRATUM_5_SYSCLOCK_HZ_MIN (300 * MEGA)
+ 
++#define RKCANFD_TX_WATCHDOG_TIMEOUT_MS 50
++
+ /* rk3568 CAN-FD Errata, as of Tue 07 Nov 2023 11:25:31 +08:00 */
+ 
+ /* Erratum 1: The error frame sent by the CAN controller has an
+@@ -456,6 +458,8 @@ struct rkcanfd_stats {
+ 
+ 	/* Erratum 6 */
+ 	u64_stats_t tx_extended_as_standard_errors;
++
++	u64_stats_t tx_watchdog_flushed;
+ };
+ 
+ struct rkcanfd_priv {
+@@ -467,6 +471,10 @@ struct rkcanfd_priv {
+ 	void __iomem *regs;
+ 	unsigned int tx_head;
+ 	unsigned int tx_tail;
++	unsigned long tx_submit[RKCANFD_TXFIFO_DEPTH];
++	struct delayed_work tx_watchdog;
++	unsigned long tx_watchdog_delay;
++	bool tx_desync;
+ 
+ 	u32 reg_mode_default;
+ 	u32 reg_int_mask_default;
+@@ -551,5 +559,8 @@ void rkcanfd_xmit_retry(struct rkcanfd_priv *priv);
+ netdev_tx_t rkcanfd_start_xmit(struct sk_buff *skb, struct net_device *ndev);
+ void rkcanfd_handle_tx_done_one(struct rkcanfd_priv *priv, const u32 ts,
+ 				unsigned int *frame_len_p);
++int rkcanfd_handle_tx_finish_int(struct rkcanfd_priv *priv);
++void rkcanfd_tx_watchdog_init(struct rkcanfd_priv *priv);
++void rkcanfd_tx_watchdog_check(struct rkcanfd_priv *priv);
+ 
+ #endif
+-- 
+2.50.1
+
