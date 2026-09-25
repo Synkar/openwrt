@@ -1,0 +1,42 @@
+From 542a7f150f3f0a108b13ea9f81807d3a1c7a7c6e Mon Sep 17 00:00:00 2001
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Date: Fri, 25 Sep 2026 11:40:31 -0300
+Subject: [PATCH] can: rockchip_canfd: run IRQ as hardirq on PREEMPT_RT
+
+On PREEMPT_RT the shared CAN interrupt is force-threaded
+(irq/NNN-can0). When the IRQ thread finishes it runs pending
+softirqs via __local_bh_enable_ip, and in that context a NET_TX
+softirq that reaches rkcanfd_start_xmit -> can_put_echo_skb ->
+skb_clone can hit the SLUB slowpath, whose rt_spin_lock tries to
+schedule with a broken preempt count, producing:
+
+  BUG: scheduling while atomic: irq/148-can0/...
+  softirq: huh, entered softirq 2 NET_TX ... with preempt_count
+  00000000, exited with ffffffff?
+
+The handler is hardirq-safe by design (that is how it runs on
+non-RT kernels): registers, raw spinlocks, GFP_ATOMIC skb
+allocations and netif_rx only. Request the IRQ with IRQF_NO_THREAD
+so on PREEMPT_RT it stays a true hardirq and the NET_TX softirq it
+raises runs in ksoftirqd with correct sleeping-lock semantics
+instead of the broken forced-thread tail.
+
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-core.c b/drivers/net/can/rockchip/rockchip_canfd-core.c
+index 6207584..f55c854 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-core.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c
+@@ -737,7 +737,8 @@ static int rkcanfd_open(struct net_device *ndev)
+ 	rkcanfd_chip_start(priv);
+ 	can_rx_offload_enable(&priv->offload);
+ 
+-	err = request_irq(ndev->irq, rkcanfd_irq, IRQF_SHARED, ndev->name, priv);
++	err = request_irq(ndev->irq, rkcanfd_irq, IRQF_SHARED | IRQF_NO_THREAD,
++			  ndev->name, priv);
+ 	if (err)
+ 		goto out_rkcanfd_chip_stop;
+ 
+-- 
+2.50.1
+
