@@ -1,0 +1,296 @@
+From 56b2f7f806035b5ba9b986c28916328d05eeaa75 Mon Sep 17 00:00:00 2001
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Date: Fri, 25 Sep 2026 23:33:17 -0300
+Subject: [PATCH] can: rockchip_canfd: detect and recover from TX engine freeze
+
+The rk3568v2 CAN IP (errata 0x1fff) locks up its TX engine under TX
+saturation or RX error bursts: STATE reports TX_PERIOD (with a TX_REQ
+bit latched in CMD), interrupts cease (INT=0) and the RX FIFO stays
+empty while the bus itself is alive. Only a chip reset recovers it.
+
+Turn the TX watchdog into a permanent 50ms heartbeat that snapshots
+STATE/CMD/INT/INTMASK/RX_FIFO_CTRL into ethtool stats (reg_*_snap) for
+diagnosis, plus a watchdog_ticks liveness counter.
+
+Detect the freeze - TX pending for 1s with TX_PERIOD or TX_BUFFER_FULL
+set and no interrupts - and recover by bouncing the chip. The recovery
+runs exclusively from the watchdog work: start_xmit only raises the
+flag, since the recovery path must not run from xmit context (the
+netif tx lock is held by the caller).
+
+Clean up pending TX echo slots on every chip stop (bus-off, ifdown,
+freeze recovery). Without this a stuck slot survives interface
+restarts and permanently drops all TX frames with
+"can_put_echo_skb: BUG! echo_skb N is occupied!".
+
+Validated on RD-BOX-RK3588 at 250 kbps: freeze storms at ~100% bus
+load (~11-22 freezes/min via cangen saturation) and sporadic
+error-burst freezes at ~12% load are each detected and recovered
+within ~1s with TX capability restored; 1627 fps (~81% load) sustained
+runs are freeze-free.
+
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-core.c b/drivers/net/can/rockchip/rockchip_canfd-core.c
+index 6207584..70f5cac 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-core.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c
+@@ -219,7 +219,7 @@ static int rkcanfd_get_berr_counter(const struct net_device *ndev,
+ 	return 0;
+ }
+ 
+-static void rkcanfd_chip_interrupts_enable(const struct rkcanfd_priv *priv)
++void rkcanfd_chip_interrupts_enable(const struct rkcanfd_priv *priv)
+ {
+ 	rkcanfd_write(priv, RKCANFD_REG_INT_MASK, priv->reg_int_mask_default);
+ 
+@@ -246,7 +246,7 @@ static void rkcanfd_chip_fifo_setup(struct rkcanfd_priv *priv)
+ 	netdev_reset_queue(priv->ndev);
+ }
+ 
+-static void rkcanfd_chip_start(struct rkcanfd_priv *priv)
++void rkcanfd_chip_start(struct rkcanfd_priv *priv)
+ {
+ 	u32 reg;
+ 
+@@ -313,6 +313,8 @@ static void rkcanfd_chip_start(struct rkcanfd_priv *priv)
+ 
+ 	priv->can.state = CAN_STATE_ERROR_ACTIVE;
+ 
++	schedule_delayed_work(&priv->tx_watchdog, priv->tx_watchdog_delay);
++
+ 	netdev_dbg(priv->ndev, "%s: reg_mode=0x%08x\n", __func__,
+ 		   rkcanfd_read(priv, RKCANFD_REG_MODE));
+ }
+@@ -323,9 +325,10 @@ static void __rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state
+ 
+ 	rkcanfd_chip_set_reset_mode(priv);
+ 	rkcanfd_chip_interrupts_disable(priv);
++	rkcanfd_tx_cleanup(priv);
+ }
+ 
+-static void rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state state)
++void rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state state)
+ {
+ 	priv->can.state = state;
+ 
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-ethtool.c b/drivers/net/can/rockchip/rockchip_canfd-ethtool.c
+index 6024cc1..2db166e 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-ethtool.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-ethtool.c
+@@ -12,12 +12,24 @@ enum rkcanfd_stats_type {
+ 	RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS,
+ 	RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS,
+ 	RKCANFD_STATS_TYPE_TX_WATCHDOG_FLUSHED,
++	RKCANFD_STATS_TYPE_REG_STATE_SNAP,
++	RKCANFD_STATS_TYPE_REG_CMD_SNAP,
++	RKCANFD_STATS_TYPE_REG_INT_SNAP,
++	RKCANFD_STATS_TYPE_REG_INTMASK_SNAP,
++	RKCANFD_STATS_TYPE_REG_RXFIFO_SNAP,
++	RKCANFD_STATS_TYPE_WATCHDOG_TICKS,
+ };
+ 
+ static const char rkcanfd_stats_strings[][ETH_GSTRING_LEN] = {
+ 	[RKCANFD_STATS_TYPE_RX_FIFO_EMPTY_ERRORS] = "rx_fifo_empty_errors",
+ 	[RKCANFD_STATS_TYPE_TX_EXTENDED_AS_STANDARD_ERRORS] = "tx_extended_as_standard_errors",
+ 	[RKCANFD_STATS_TYPE_TX_WATCHDOG_FLUSHED] = "tx_watchdog_flushed",
++	[RKCANFD_STATS_TYPE_REG_STATE_SNAP] = "reg_state_snap",
++	[RKCANFD_STATS_TYPE_REG_CMD_SNAP] = "reg_cmd_snap",
++	[RKCANFD_STATS_TYPE_REG_INT_SNAP] = "reg_int_snap",
++	[RKCANFD_STATS_TYPE_REG_INTMASK_SNAP] = "reg_intmask_snap",
++	[RKCANFD_STATS_TYPE_REG_RXFIFO_SNAP] = "reg_rxfifo_snap",
++	[RKCANFD_STATS_TYPE_WATCHDOG_TICKS] = "watchdog_ticks",
+ };
+ 
+ static void
+@@ -59,6 +71,18 @@ rkcanfd_ethtool_get_ethtool_stats(struct net_device *ndev,
+ 			u64_stats_read(&rkcanfd_stats->tx_extended_as_standard_errors);
+ 		data[RKCANFD_STATS_TYPE_TX_WATCHDOG_FLUSHED] =
+ 			u64_stats_read(&rkcanfd_stats->tx_watchdog_flushed);
++		data[RKCANFD_STATS_TYPE_REG_STATE_SNAP] =
++			u64_stats_read(&rkcanfd_stats->reg_state_snap);
++		data[RKCANFD_STATS_TYPE_REG_CMD_SNAP] =
++			u64_stats_read(&rkcanfd_stats->reg_cmd_snap);
++		data[RKCANFD_STATS_TYPE_REG_INT_SNAP] =
++			u64_stats_read(&rkcanfd_stats->reg_int_snap);
++		data[RKCANFD_STATS_TYPE_REG_INTMASK_SNAP] =
++			u64_stats_read(&rkcanfd_stats->reg_intmask_snap);
++		data[RKCANFD_STATS_TYPE_REG_RXFIFO_SNAP] =
++			u64_stats_read(&rkcanfd_stats->reg_rxfifo_snap);
++		data[RKCANFD_STATS_TYPE_WATCHDOG_TICKS] =
++			u64_stats_read(&rkcanfd_stats->watchdog_ticks);
+ 	} while (u64_stats_fetch_retry(&rkcanfd_stats->syncp, start));
+ }
+ 
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-tx.c b/drivers/net/can/rockchip/rockchip_canfd-tx.c
+index 5e110c1..bb76197 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-tx.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-tx.c
+@@ -92,6 +92,44 @@ void rkcanfd_tx_watchdog_check(struct rkcanfd_priv *priv)
+ 
+ 	raw_spin_lock_irqsave(&priv->tx_lock, flags);
+ 
++	{
++		struct rkcanfd_stats *rkcanfd_stats = &priv->stats;
++		u32 snap_state = rkcanfd_read(priv, RKCANFD_REG_STATE);
++		u32 snap_cmd = rkcanfd_read(priv, RKCANFD_REG_CMD);
++		u32 snap_int = rkcanfd_read(priv, RKCANFD_REG_INT);
++		u32 snap_intmask = rkcanfd_read(priv, RKCANFD_REG_INT_MASK);
++		u32 snap_rxfifo = rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL);
++		bool frozen = rkcanfd_get_tx_pending(priv) &&
++			(snap_state & (RKCANFD_REG_STATE_TX_PERIOD |
++				       RKCANFD_REG_STATE_TX_BUFFER_FULL)) &&
++			!snap_int;
++
++		u64_stats_update_begin(&rkcanfd_stats->syncp);
++		u64_stats_set(&rkcanfd_stats->reg_state_snap, snap_state);
++		u64_stats_set(&rkcanfd_stats->reg_cmd_snap, snap_cmd);
++		u64_stats_set(&rkcanfd_stats->reg_int_snap, snap_int);
++		u64_stats_set(&rkcanfd_stats->reg_intmask_snap, snap_intmask);
++		u64_stats_set(&rkcanfd_stats->reg_rxfifo_snap, snap_rxfifo);
++		u64_stats_update_end(&rkcanfd_stats->syncp);
++
++		/* rk3568v2 erratum: the whole CAN IP can lock up - the TX
++		 * engine permanently claims TX_PERIOD with a pending TX_REQ,
++		 * no interrupt of any kind is asserted and RX goes silent,
++		 * all while the controller reports ERROR-ACTIVE. Nothing
++		 * recovers it except a chip reset. Detect the stuck state
++		 * for RKCANFD_TX_FREEZE_TICKS consecutive ticks and bounce
++		 * the chip; pending echo slots are flushed by the desync
++		 * pass on the next tick. */
++		if (frozen) {
++			if (++priv->tx_freeze_ticks >= RKCANFD_TX_FREEZE_TICKS) {
++				priv->tx_freeze_ticks = 0;
++				WRITE_ONCE(priv->tx_need_reset, true);
++			}
++		} else {
++			priv->tx_freeze_ticks = 0;
++		}
++	}
++
+ 	flush_all = READ_ONCE(priv->tx_desync);
+ 	if (flush_all)
+ 		WRITE_ONCE(priv->tx_desync, false);
+@@ -167,15 +205,69 @@ void rkcanfd_tx_watchdog_check(struct rkcanfd_priv *priv)
+ 					      RKCANFD_TX_START_THRESHOLD);
+ }
+ 
++void rkcanfd_tx_cleanup(struct rkcanfd_priv *priv)
++{
++	struct net_device_stats *stats = &priv->ndev->stats;
++	unsigned int cleaned = 0, frame_len = 0;
++	unsigned long flags;
++
++	raw_spin_lock_irqsave(&priv->tx_lock, flags);
++
++	while (rkcanfd_get_tx_pending(priv)) {
++		const unsigned int tx_tail = rkcanfd_get_tx_tail(priv);
++
++		can_free_echo_skb(priv->ndev, tx_tail, &frame_len);
++		WRITE_ONCE(priv->tx_tail, priv->tx_tail + 1);
++		cleaned++;
++	}
++	WRITE_ONCE(priv->tx_desync, false);
++
++	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
++
++	if (cleaned)
++		stats->tx_dropped += cleaned;
++}
++
++/* Runs from the watchdog work only (process context): the recovery
++ * bounces the frozen chip and restores a clean TX state. It must not
++ * run from xmit/irq context - rkcanfd_tx_watchdog_check() only raises
++ * the flag. */
++void rkcanfd_tx_watchdog_recover(struct rkcanfd_priv *priv)
++{
++	struct rkcanfd_stats *rkcanfd_stats = &priv->stats;
++
++	netdev_info(priv->ndev,
++		    "TX engine frozen (state=0x%08x cmd=0x%08x int=0x%08x intmask=0x%08x rxfifo=0x%08x) - resetting chip\n",
++		    (u32)u64_stats_read(&rkcanfd_stats->reg_state_snap),
++		    (u32)u64_stats_read(&rkcanfd_stats->reg_cmd_snap),
++		    (u32)u64_stats_read(&rkcanfd_stats->reg_int_snap),
++		    (u32)u64_stats_read(&rkcanfd_stats->reg_intmask_snap),
++		    (u32)u64_stats_read(&rkcanfd_stats->reg_rxfifo_snap));
++
++	netif_tx_stop_all_queues(priv->ndev);
++	rkcanfd_chip_stop(priv, priv->can.state);
++	rkcanfd_chip_start(priv);
++	rkcanfd_chip_interrupts_enable(priv);
++	netif_tx_wake_all_queues(priv->ndev);
++}
++
+ static void rkcanfd_tx_watchdog_work(struct work_struct *work)
+ {
+ 	struct rkcanfd_priv *priv = container_of(to_delayed_work(work),
+ 						 struct rkcanfd_priv, tx_watchdog);
+ 
++	u64_stats_update_begin(&priv->stats.syncp);
++	u64_stats_inc(&priv->stats.watchdog_ticks);
++	u64_stats_update_end(&priv->stats.syncp);
++
+ 	rkcanfd_tx_watchdog_check(priv);
+ 
+-	if (rkcanfd_get_tx_pending(priv))
+-		schedule_delayed_work(&priv->tx_watchdog, priv->tx_watchdog_delay);
++	if (READ_ONCE(priv->tx_need_reset)) {
++		WRITE_ONCE(priv->tx_need_reset, false);
++		rkcanfd_tx_watchdog_recover(priv);
++	}
++
++	schedule_delayed_work(&priv->tx_watchdog, priv->tx_watchdog_delay);
+ }
+ 
+ void rkcanfd_tx_watchdog_init(struct rkcanfd_priv *priv)
+diff --git a/drivers/net/can/rockchip/rockchip_canfd.h b/drivers/net/can/rockchip/rockchip_canfd.h
+index 07c345e..fa1e482 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd.h
++++ b/drivers/net/can/rockchip/rockchip_canfd.h
+@@ -298,6 +298,7 @@
+ #define RKCANFD_ERRATUM_5_SYSCLOCK_HZ_MIN (300 * MEGA)
+ 
+ #define RKCANFD_TX_WATCHDOG_TIMEOUT_MS 50
++#define RKCANFD_TX_FREEZE_TICKS 20
+ 
+ /* rk3568 CAN-FD Errata, as of Tue 07 Nov 2023 11:25:31 +08:00 */
+ 
+@@ -460,6 +461,14 @@ struct rkcanfd_stats {
+ 	u64_stats_t tx_extended_as_standard_errors;
+ 
+ 	u64_stats_t tx_watchdog_flushed;
++
++	/* debug: register snapshot, refreshed by the TX watchdog on every tick */
++	u64_stats_t reg_state_snap;
++	u64_stats_t reg_cmd_snap;
++	u64_stats_t reg_int_snap;
++	u64_stats_t reg_intmask_snap;
++	u64_stats_t reg_rxfifo_snap;
++	u64_stats_t watchdog_ticks;
+ };
+ 
+ struct rkcanfd_priv {
+@@ -475,6 +484,8 @@ struct rkcanfd_priv {
+ 	struct delayed_work tx_watchdog;
+ 	unsigned long tx_watchdog_delay;
+ 	bool tx_desync;
++	unsigned int tx_freeze_ticks;
++	bool tx_need_reset;
+ 
+ 	u32 reg_mode_default;
+ 	u32 reg_int_mask_default;
+@@ -562,5 +573,11 @@ void rkcanfd_handle_tx_done_one(struct rkcanfd_priv *priv, const u32 ts,
+ int rkcanfd_handle_tx_finish_int(struct rkcanfd_priv *priv);
+ void rkcanfd_tx_watchdog_init(struct rkcanfd_priv *priv);
+ void rkcanfd_tx_watchdog_check(struct rkcanfd_priv *priv);
++void rkcanfd_tx_watchdog_recover(struct rkcanfd_priv *priv);
++void rkcanfd_tx_cleanup(struct rkcanfd_priv *priv);
++
++void rkcanfd_chip_start(struct rkcanfd_priv *priv);
++void rkcanfd_chip_stop(struct rkcanfd_priv *priv, const enum can_state state);
++void rkcanfd_chip_interrupts_enable(const struct rkcanfd_priv *priv);
+ 
+ #endif
+-- 
+2.50.1
+
