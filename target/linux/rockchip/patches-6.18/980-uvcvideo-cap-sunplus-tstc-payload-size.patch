@@ -1,0 +1,58 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] uvcvideo: cap Sunplus TSTC payload transfer size
+
+The Sunplus TSTC USB20 WEB CAMERA (1bcf:2cd1) reports a fixed,
+oversized dwMaxPayloadTransferSize regardless of the negotiated
+format, resolution or frame rate. uvcvideo then selects the highest
+isochronous altsetting (3060 bytes/microframe), which reserves the
+whole USB 2.0 periodic bandwidth of the bus and makes a second
+camera on the same bus fail VIDIOC_STREAMON with -ENOSPC.
+
+Recompute the payload transfer size from the negotiated format for
+this device, for both compressed and uncompressed formats.
+
+---
+ drivers/media/usb/uvc/uvc_video.c | 32 ++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+--- a/drivers/media/usb/uvc/uvc_video.c
++++ b/drivers/media/usb/uvc/uvc_video.c
+@@ -263,6 +263,38 @@ static void uvc_fixup_video_ctrl(struct u
+ 		ctrl->dwMaxPayloadTransferSize = bandwidth;
+ 	}
+
++	/*
++	 * Sunplus TSTC USB20 WEB CAMERA (1bcf:2cd1) reports a fixed,
++	 * oversized dwMaxPayloadTransferSize for every format, which
++	 * selects the highest altsetting and exhausts the USB 2.0
++	 * isochronous bandwidth of the bus. Recompute the payload
++	 * size from the negotiated format instead.
++	 */
++	if (stream->dev->udev->descriptor.idVendor == cpu_to_le16(0x1bcf) &&
++	    stream->dev->udev->descriptor.idProduct == cpu_to_le16(0x2cd1) &&
++	    stream->intf->num_altsetting > 1) {
++		u32 interval;
++		u32 bandwidth;
++
++		interval = (ctrl->dwFrameInterval > 100000)
++			 ? ctrl->dwFrameInterval
++			 : frame->dwFrameInterval[0];
++
++		bandwidth = frame->wWidth * frame->wHeight / 8 * format->bpp;
++		if (format->flags & UVC_FMT_FLAG_COMPRESSED)
++			bandwidth = max_t(u32, bandwidth / 8, 512);
++
++		bandwidth *= 10000000 / interval + 1;
++		bandwidth /= 1000;
++		if (stream->dev->udev->speed >= USB_SPEED_HIGH)
++			bandwidth /= 8;
++		bandwidth += 12;
++		bandwidth = max_t(u32, bandwidth, 512);
++
++		if (bandwidth < ctrl->dwMaxPayloadTransferSize)
++			ctrl->dwMaxPayloadTransferSize = bandwidth;
++	}
++
+ 	if (stream->intf->num_altsetting > 1 &&
+ 	    ctrl->dwMaxPayloadTransferSize > stream->maxpsize) {
+ 		dev_warn_ratelimited(&stream->intf->dev,
