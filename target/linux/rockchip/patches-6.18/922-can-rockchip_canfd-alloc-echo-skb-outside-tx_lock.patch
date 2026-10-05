@@ -1,0 +1,61 @@
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Subject: can: rockchip_canfd: install the echo skb outside of tx_lock
+
+rkcanfd_start_xmit() calls can_put_echo_skb(), which allocates via
+skb_clone(), while holding priv->tx_lock as a raw_spinlock with IRQs
+disabled. On PREEMPT_RT, when the SLUB per-CPU fastpath misses,
+kmem_cache_alloc() takes the sleepable node list lock (rt_spin_lock)
+and tries to schedule with the raw lock held:
+
+  BUG: scheduling while atomic: irq/148-can0/0x00000002
+  rkcanfd_start_xmit+0xd0/0x4ec
+  can_put_echo_skb+0x6c/0x214 [can_dev]
+  skb_clone+0x60/0xd0
+  kmem_cache_alloc_noprof+0x18c/0x20c
+  ___slab_alloc.isra.0+0x5c/0xa60
+  rt_spin_lock+0xec/0x144
+  schedule_rtlock+0x28/0x58
+
+Move the echo skb installation (and the tx_head/frame_len reads it
+needs) before the raw_spin_lock_irqsave(). The ordering guarantee of
+the upstream v5 series is preserved: the echo skb is still installed
+before the TX FIFO is programmed, and the tx_head advance plus the
+erratum-12 MODE/CMD sequence remain under tx_lock. Only the allocation
+leaves the atomic section.
+
+The move is safe: start_xmit() is serialized by the netdev TX lock and
+is the only writer of tx_head, and the consumer paths (RXSTX
+completion, TX watchdog) only access echo slots at tx_tail, which are
+already published via the tx_head advance under tx_lock. The FIFO-free
+gate at the top of start_xmit() guarantees the tx_head slot is not
+pending while it is being installed.
+
+Fixes: 920-can-rockchip_canfd-fix-TX-stalls-and-races.patch
+(backport of https://lists.openwall.net/linux-kernel/2026/07/31/1110)
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+---
+ drivers/net/can/rockchip/rockchip_canfd-tx.c | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+--- a/drivers/net/can/rockchip/rockchip_canfd-tx.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-tx.c
+@@ -178,17 +178,16 @@ netdev_tx_t rkcanfd_start_xmit(struct sk_
+ 		return NETDEV_TX_BUSY;
+ 	}
+ 
+-	raw_spin_lock_irqsave(&priv->tx_lock, flags);
+ 	tx_head = rkcanfd_get_tx_head(priv);
+ 	frame_len = can_skb_get_frame_len(skb);
+ 	err = can_put_echo_skb(skb, ndev, tx_head, frame_len);
+ 	if (err) {
+-		raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
+-
+ 		ndev->stats.tx_dropped++;
+ 		return NETDEV_TX_OK;
+ 	}
+ 
++	raw_spin_lock_irqsave(&priv->tx_lock, flags);
++
+ 	skb = priv->can.echo_skb[tx_head];
+ 	cfd = (const struct canfd_frame *)skb->data;
+ 
