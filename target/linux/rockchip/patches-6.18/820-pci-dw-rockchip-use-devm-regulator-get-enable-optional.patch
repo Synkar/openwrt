@@ -1,0 +1,102 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] pci: dw-rockchip: add remove() and let devm release vpcie3v3
+
+The driver never disables the vpcie3v3 regulator it enables in probe,
+and ships no remove() callback while also setting suppress_bind_attrs,
+so it cannot even be unbound to trigger devres cleanup. Result: the
+WiFi module 3V3 rail is pinned on forever (stale consumer in
+regulator_summary) and no runtime power-cycle of the endpoint is
+possible.
+
+Fix both:
+- switch to devm_regulator_get_enable_optional() so the enable is
+  undone by devres
+- add a remove() that tears down host/EP, clocks, PHY and reset, and
+  drop suppress_bind_attrs so bind/unbind works
+
+Signed-off-by: Synkar <dev@synkar.com>
+---
+--- a/drivers/pci/controller/dwc/pcie-dw-rockchip.c
++++ b/drivers/pci/controller/dwc/pcie-dw-rockchip.c
+@@ -21,6 +21,7 @@
+ #include <linux/phy/phy.h>
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+ 
+ #include "../../pci.h"
+@@ -95,7 +96,6 @@
+ 	unsigned int clk_cnt;
+ 	struct reset_control *rst;
+ 	struct gpio_desc *rst_gpio;
+-	struct regulator *vpcie3v3;
+ 	struct irq_domain *irq_domain;
+ 	const struct rockchip_pcie_of_data *data;
+ 	bool supports_clkreq;
+@@ -665,22 +665,14 @@
+ 		return ret;
+ 
+ 	/* DON'T MOVE ME: must be enable before PHY init */
+-	rockchip->vpcie3v3 = devm_regulator_get_optional(dev, "vpcie3v3");
+-	if (IS_ERR(rockchip->vpcie3v3)) {
+-		if (PTR_ERR(rockchip->vpcie3v3) != -ENODEV)
+-			return dev_err_probe(dev, PTR_ERR(rockchip->vpcie3v3),
+-					"failed to get vpcie3v3 regulator\n");
+-		rockchip->vpcie3v3 = NULL;
+-	} else {
+-		ret = regulator_enable(rockchip->vpcie3v3);
+-		if (ret)
+-			return dev_err_probe(dev, ret,
+-					     "failed to enable vpcie3v3 regulator\n");
+-	}
++	ret = devm_regulator_get_enable_optional(dev, "vpcie3v3");
++	if (ret < 0 && ret != -ENODEV)
++		return dev_err_probe(dev, ret,
++				     "failed to enable vpcie3v3 regulator\n");
+ 
+ 	ret = rockchip_pcie_phy_init(rockchip);
+ 	if (ret)
+-		goto disable_regulator;
++		return ret;
+ 
+ 	ret = reset_control_deassert(rockchip->rst);
+ 	if (ret)
+@@ -713,13 +705,24 @@
+ 	clk_bulk_disable_unprepare(rockchip->clk_cnt, rockchip->clks);
+ deinit_phy:
+ 	rockchip_pcie_phy_deinit(rockchip);
+-disable_regulator:
+-	if (rockchip->vpcie3v3)
+-		regulator_disable(rockchip->vpcie3v3);
+ 
+ 	return ret;
+ }
+ 
++static void rockchip_pcie_remove(struct platform_device *pdev)
++{
++	struct rockchip_pcie *rockchip = platform_get_drvdata(pdev);
++
++	if (rockchip->data->mode == DW_PCIE_RC_TYPE)
++		dw_pcie_host_deinit(&rockchip->pci.pp);
++	else
++		dw_pcie_ep_deinit(&rockchip->pci.ep);
++
++	clk_bulk_disable_unprepare(rockchip->clk_cnt, rockchip->clks);
++	rockchip_pcie_phy_deinit(rockchip);
++	reset_control_assert(rockchip->rst);
++}
++
+ static const struct rockchip_pcie_of_data rockchip_pcie_rc_of_data_rk3568 = {
+ 	.mode = DW_PCIE_RC_TYPE,
+ };
+@@ -754,8 +757,8 @@
+ 	.driver = {
+ 		.name	= "rockchip-dw-pcie",
+ 		.of_match_table = rockchip_pcie_of_match,
+-		.suppress_bind_attrs = true,
+ 	},
+ 	.probe = rockchip_pcie_probe,
++	.remove = rockchip_pcie_remove,
+ };
+ builtin_platform_driver(rockchip_pcie_driver);

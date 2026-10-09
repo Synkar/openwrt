@@ -1,0 +1,482 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] bcmdhd: port Rockchip vendor driver 6.1 -> 6.18 for AP6275P/BCM43752 (WiFi6)
+
+Port the rkwifi bcmdhd driver (101.10.591.x, kernel-6.1 SDK) to kernel
+6.18 for out-of-tree build against OpenWrt mac80211 backports headers.
+Enables 802.11ax (HE) on AP6275P PCIe, which mainline brcmfmac lacks.
+
+Compat: linuxver.h (lib80211/MODULE_IMPORT_NS/timer_delete), unaligned.h
+(6.17), RPS stub (6.9), kstat_irqs percpu (6.18), cfg80211 radio_idx
+wrappers + ch_switch_notify (6.17/6.18), out-of-tree -I fix, dhd_gpio with
+weak rockchip_wifi_* stubs, MRRS=128 quirk, cfg80211 parent = PCI device,
+SYNDBG/SYNDBG2 debug prints.
+
+---
+diff -Naur a/Makefile b/Makefile
+--- a/Makefile	2026-10-09 10:14:33.098572260 -0300
++++ b/Makefile	2026-10-09 11:52:08.000000000 -0300
+@@ -476,7 +476,10 @@
+ #$(warning "BCMDHD_ROOT=$(BCMDHD_ROOT)")
+ EXTRA_CFLAGS = $(DHDCFLAGS)
+ EXTRA_CFLAGS += -DDHD_COMPILED=\"$(BCMDHD_ROOT)\"
+-EXTRA_CFLAGS += -I$(srctree)/$(BCMDHD_ROOT)/include/ -I$(srctree)/$(BCMDHD_ROOT)/
++EXTRA_CFLAGS += -I$(BCMDHD_ROOT)/include/ -I$(BCMDHD_ROOT)/
++EXTRA_CFLAGS += -I/build/openwrt/build_dir/target-aarch64_generic_glibc/linux-rockchip_armv8/mac80211-regular/backports-6.18.39/backport-include/ -I/build/openwrt/build_dir/target-aarch64_generic_glibc/linux-rockchip_armv8/mac80211-regular/backports-6.18.39/backport-include/uapi -I/build/openwrt/build_dir/target-aarch64_generic_glibc/linux-rockchip_armv8/mac80211-regular/backports-6.18.39/include/ -I/build/openwrt/build_dir/target-aarch64_generic_glibc/linux-rockchip_armv8/mac80211-regular/backports-6.18.39/include/uapi
++EXTRA_CFLAGS += -include /build/openwrt/build_dir/target-aarch64_generic_glibc/linux-rockchip_armv8/mac80211-regular/backports-6.18.39/backport-include/backport/backport.h
++EXTRA_CFLAGS += -Wno-error -Wno-missing-prototypes -Wno-empty-body
+ ifeq ($(CONFIG_AP6XXX),m)
+ EXTRA_LDFLAGS += --strip-debug
+ endif
+diff -Naur a/dbus_usb_linux.c b/dbus_usb_linux.c
+--- a/dbus_usb_linux.c	2026-10-09 10:14:33.098572260 -0300
++++ b/dbus_usb_linux.c	2026-10-09 11:26:43.000000000 -0300
+@@ -69,7 +69,11 @@
+ #include <linux/spinlock.h>
+ #include <linux/list.h>
+ #include <asm/uaccess.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+ #include <asm/unaligned.h>
++#else
++#include <linux/unaligned.h>
++#endif
+ #include <dbus.h>
+ #include <bcmutils.h>
+ #include <bcmdevs_legacy.h>
+diff -Naur a/dhd.h b/dhd.h
+--- a/dhd.h	2026-10-09 10:14:33.098572260 -0300
++++ b/dhd.h	2026-10-09 11:26:43.000000000 -0300
+@@ -46,7 +46,11 @@
+ #include <linux/ethtool.h>
+ #include <linux/proc_fs.h>
+ #include <asm/uaccess.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+ #include <asm/unaligned.h>
++#else
++#include <linux/unaligned.h>
++#endif
+ #include <linux/fs.h>
+ #include <linux/namei.h>
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+diff -Naur a/dhd_gpio.c b/dhd_gpio.c
+--- a/dhd_gpio.c	2026-10-09 10:14:33.108572249 -0300
++++ b/dhd_gpio.c	2026-10-09 11:26:43.000000000 -0300
+@@ -9,6 +9,12 @@
+ #include <linux/platform_device.h>
+ #endif
+ #ifdef CUSTOMER_HW_ROCKCHIP
++
++/* Sem o driver rfkill-wlan do SDK Rockchip (OpenWrt mainline):
++ * stubs weak para linkar; PCIe nao usa power-via-rfkill */
++int __weak rockchip_wifi_power(int on) { return 0; }
++int __weak rockchip_wifi_mac_addr(unsigned char *buf) { return -1; }
++int __weak rockchip_wifi_set_card_detection(int val) { return 0; }
+ #include <linux/rfkill-wlan.h>
+ #endif
+ 
+diff -Naur a/dhd_linux.c b/dhd_linux.c
+--- a/dhd_linux.c	2026-10-09 10:14:33.108572249 -0300
++++ b/dhd_linux.c	2026-10-09 11:26:43.000000000 -0300
+@@ -62,7 +62,11 @@
+ #endif /* ENABLE_ADAPTIVE_SCHED */
+ #include <linux/rtc.h>
+ #include <asm/uaccess.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+ #include <asm/unaligned.h>
++#else
++#include <linux/unaligned.h>
++#endif
+ #include <dhd_linux_priv.h>
+ #ifdef BCMPCIE
+ #ifdef CONFIG_PCIEASPM_ROCKCHIP_WIFI_EXTENSION
+@@ -21005,6 +21009,13 @@
+ 	return BCME_OK;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
++int custom_rps_map_set(struct netdev_rx_queue *queue, char *buf, size_t len)
++{
++	/* rps_map internals are private since 6.9; RPS cpu steering disabled */
++	return len;
++}
++#else
+ int custom_rps_map_set(struct netdev_rx_queue *queue, char *buf, size_t len)
+ {
+ 	struct rps_map *old_map, *map;
+@@ -21076,7 +21087,13 @@
+ 	DHD_INFO(("%s : Done. mapping cpu nummber : %d\n", __FUNCTION__, map->len));
+ 	return map->len;
+ }
++#endif /* LINUX_VERSION_CODE < 6.9.0 */
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0)
++void custom_rps_map_clear(struct netdev_rx_queue *queue)
++{
++}
++#else
+ void custom_rps_map_clear(struct netdev_rx_queue *queue)
+ {
+ 	struct rps_map *map;
+@@ -21090,6 +21107,7 @@
+ 		DHD_INFO(("%s : rps_cpus map clear.\n", __FUNCTION__));
+ 	}
+ }
++#endif /* LINUX_VERSION_CODE < 6.9.0 */
+ #endif // endif
+ 
+ #ifdef DHD_DEBUG_PAGEALLOC
+@@ -22233,7 +22251,7 @@
+ 	bcm_bprintf(&strbuf, "dhd irq %u:", irq_num);
+ 	for_each_online_cpu(i)
+ 		bcm_bprintf(&strbuf, "%10u ",
+-			desc->kstat_irqs ? *per_cpu_ptr(desc->kstat_irqs, i) : 0);
++			desc->kstat_irqs ? per_cpu_ptr(desc->kstat_irqs, i)->cnt : 0);
+ 	if (desc->irq_data.chip) {
+ 		if (desc->irq_data.chip->name)
+ 			bcm_bprintf(&strbuf, " %8s", desc->irq_data.chip->name);
+diff -Naur a/dhd_linux_rx.c b/dhd_linux_rx.c
+--- a/dhd_linux_rx.c	2026-10-09 10:14:33.108572249 -0300
++++ b/dhd_linux_rx.c	2026-10-09 11:26:43.000000000 -0300
+@@ -64,7 +64,11 @@
+ #include <linux/rtc.h>
+ #include <linux/namei.h>
+ #include <asm/uaccess.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+ #include <asm/unaligned.h>
++#else
++#include <linux/unaligned.h>
++#endif
+ #include <dhd_linux_priv.h>
+ 
+ #include <epivers.h>
+diff -Naur a/dhd_linux_tx.c b/dhd_linux_tx.c
+--- a/dhd_linux_tx.c	2026-10-09 10:14:33.108572249 -0300
++++ b/dhd_linux_tx.c	2026-10-09 11:26:43.000000000 -0300
+@@ -63,7 +63,11 @@
+ #include <linux/rtc.h>
+ #include <linux/namei.h>
+ #include <asm/uaccess.h>
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 17, 0)
+ #include <asm/unaligned.h>
++#else
++#include <linux/unaligned.h>
++#endif
+ #include <dhd_linux_priv.h>
+ 
+ #include <epivers.h>
+diff -Naur a/dhd_pcie_linux.c b/dhd_pcie_linux.c
+--- a/dhd_pcie_linux.c	2026-10-09 10:14:33.118572240 -0300
++++ b/dhd_pcie_linux.c	2026-10-09 14:03:21.000000000 -0300
+@@ -1537,6 +1537,16 @@
+ dhdpcie_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
+ {
+ 	int err = 0;
++	pcie_set_readrq(pdev, 128);
++#if defined(BCMDONGLEHOST)
++	/* BCMDONGLEHOST builds skip setting the cfg80211 parent: use the
++	 * PCIe device so sysfs/iwinfo/LuCI resolve the real hardware.
++	 */
++	{
++		extern void wl_cfg80211_set_parent_dev(void *dev);
++		wl_cfg80211_set_parent_dev(&pdev->dev);
++	}
++#endif
+ 	DHD_MUTEX_LOCK();
+ 
+ 	if (dhdpcie_chipmatch (pdev->vendor, pdev->device)) {
+diff -Naur a/include/linux/rfkill-wlan.h b/include/linux/rfkill-wlan.h
+--- a/include/linux/rfkill-wlan.h	1969-12-31 21:00:00.000000000 -0300
++++ b/include/linux/rfkill-wlan.h	2026-10-09 11:26:43.000000000 -0300
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __PLAT_BOARD_H
++#define __PLAT_BOARD_H
++
++#include <linux/types.h>
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/clk.h>
++
++struct rksdmmc_iomux {
++    char    *name;  //set the MACRO of gpio
++    int     fgpio;
++    int     fmux;
++};
++
++struct rksdmmc_gpio {
++    int     io;                             //set the address of gpio
++    char    name[64];   //
++    int     enable;  // disable = !enable   //set the default value,i.e,GPIO_HIGH or GPIO_LOW
++    struct rksdmmc_iomux  iomux;
++};
++
++struct rksdmmc_pmu {
++    bool power_ctrl_by_pmu;
++    char pmu_regulator[20];
++    int  enable;
++};
++
++struct rksdmmc_gpio_wifi_moudle {
++    int sdio_vol;    //sdio reference voltage
++    bool vref_ctrl_enble;
++    bool wifi_power_remain;
++    struct rksdmmc_pmu    mregulator;
++    struct rksdmmc_pmu    ioregulator;
++    struct rksdmmc_gpio   vbat_n;
++    struct rksdmmc_gpio   power_n;  //PMU_EN  
++    struct rksdmmc_gpio   reset_n;  //SYSRET_B, DAIRST 
++    struct rksdmmc_gpio   vddio;
++    struct rksdmmc_gpio   bgf_int_b;
++    struct rksdmmc_gpio   wifi_int_b;
++    struct rksdmmc_gpio   gps_sync;
++    struct rksdmmc_gpio   ANTSEL2;  //pin5--ANTSEL2  
++    struct rksdmmc_gpio   ANTSEL3;  //pin6--ANTSEL3 
++    struct rksdmmc_gpio   GPS_LAN;  //pin33--GPS_LAN
++    struct regmap *grf;
++	struct clk *ext_clk;
++};
++
++#if IS_REACHABLE(CONFIG_RFKILL_RK)
++int rfkill_get_wifi_power_state(int *power);
++#else
++static inline int rfkill_get_wifi_power_state(int *power)
++{
++	return -1;
++}
++#endif
++void *rockchip_mem_prealloc(int section, unsigned long size);
++int rfkill_set_wifi_bt_power(int on);
++int rockchip_wifi_power(int on);
++int rockchip_wifi_set_carddetect(int val);
++int rockchip_wifi_get_oob_irq(void);
++int rockchip_wifi_get_oob_irq_flag(void);
++int rockchip_wifi_reset(int on);
++int rockchip_wifi_mac_addr(unsigned char *buf);
++void *rockchip_wifi_country_code(char *ccode);
++int rfkill_wlan_init(void);
++void rfkill_wlan_exit(void);
++
++#endif
+diff -Naur a/include/linuxver.h b/include/linuxver.h
+--- a/include/linuxver.h	2026-10-09 10:14:33.128572232 -0300
++++ b/include/linuxver.h	2026-10-09 11:26:43.000000000 -0300
+@@ -25,6 +25,7 @@
+ #ifndef _linuxver_h_
+ #define _linuxver_h_
+ 
++
+ /*
+  * The below pragmas are added as workaround for errors caused by update
+  * of gcc version to 4.8.2. GCC 4.6 adds -Wunused-but-set-variable and
+@@ -201,7 +202,7 @@
+ #include <uapi/linux/sched/types.h>
+ #endif /* LINUX_VERS >= 4.11.0 */
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 29)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 29) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
+ #include <net/lib80211.h>
+ #endif
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(2, 6, 29)
+@@ -405,10 +406,15 @@
+ #define timer_set_private(timer_compat, priv) (timer_compat)->arg = priv
+ #define timer_expires(timer_compat) (timer_compat)->timer.expires
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0)
++#define del_timer(t) timer_delete(&((t)->timer))
++#define del_timer_sync(t) timer_delete_sync(&((t)->timer))
++#else
+ #define del_timer(t) del_timer(&((t)->timer))
+ #ifndef del_timer_sync
+ #define del_timer_sync(t) del_timer_sync(&((t)->timer))
+ #endif
++#endif
+ #define timer_pending(t) timer_pending(&((t)->timer))
+ #define add_timer(t) add_timer(&((t)->timer))
+ #define mod_timer(t, j) mod_timer(&((t)->timer), j)
+@@ -978,7 +984,7 @@
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
+ // New google android GKI not allow kernel_write/kernel_read, and use
+ // below for temporary overcome, and waiting for get rid of that for future
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(6, 9, 0)
+ MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+ #endif // LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+ #define vfs_write(fp, buf, len, pos) kernel_write(fp, buf, len, pos)
+diff -Naur a/include/rfkill-wlan.h b/include/rfkill-wlan.h
+--- a/include/rfkill-wlan.h	1969-12-31 21:00:00.000000000 -0300
++++ b/include/rfkill-wlan.h	2026-10-09 11:26:43.000000000 -0300
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __PLAT_BOARD_H
++#define __PLAT_BOARD_H
++
++#include <linux/types.h>
++#include <linux/init.h>
++#include <linux/device.h>
++#include <linux/clk.h>
++
++struct rksdmmc_iomux {
++    char    *name;  //set the MACRO of gpio
++    int     fgpio;
++    int     fmux;
++};
++
++struct rksdmmc_gpio {
++    int     io;                             //set the address of gpio
++    char    name[64];   //
++    int     enable;  // disable = !enable   //set the default value,i.e,GPIO_HIGH or GPIO_LOW
++    struct rksdmmc_iomux  iomux;
++};
++
++struct rksdmmc_pmu {
++    bool power_ctrl_by_pmu;
++    char pmu_regulator[20];
++    int  enable;
++};
++
++struct rksdmmc_gpio_wifi_moudle {
++    int sdio_vol;    //sdio reference voltage
++    bool vref_ctrl_enble;
++    bool wifi_power_remain;
++    struct rksdmmc_pmu    mregulator;
++    struct rksdmmc_pmu    ioregulator;
++    struct rksdmmc_gpio   vbat_n;
++    struct rksdmmc_gpio   power_n;  //PMU_EN  
++    struct rksdmmc_gpio   reset_n;  //SYSRET_B, DAIRST 
++    struct rksdmmc_gpio   vddio;
++    struct rksdmmc_gpio   bgf_int_b;
++    struct rksdmmc_gpio   wifi_int_b;
++    struct rksdmmc_gpio   gps_sync;
++    struct rksdmmc_gpio   ANTSEL2;  //pin5--ANTSEL2  
++    struct rksdmmc_gpio   ANTSEL3;  //pin6--ANTSEL3 
++    struct rksdmmc_gpio   GPS_LAN;  //pin33--GPS_LAN
++    struct regmap *grf;
++	struct clk *ext_clk;
++};
++
++#if IS_REACHABLE(CONFIG_RFKILL_RK)
++int rfkill_get_wifi_power_state(int *power);
++#else
++static inline int rfkill_get_wifi_power_state(int *power)
++{
++	return -1;
++}
++#endif
++void *rockchip_mem_prealloc(int section, unsigned long size);
++int rfkill_set_wifi_bt_power(int on);
++int rockchip_wifi_power(int on);
++int rockchip_wifi_set_carddetect(int val);
++int rockchip_wifi_get_oob_irq(void);
++int rockchip_wifi_get_oob_irq_flag(void);
++int rockchip_wifi_reset(int on);
++int rockchip_wifi_mac_addr(unsigned char *buf);
++void *rockchip_wifi_country_code(char *ccode);
++int rfkill_wlan_init(void);
++void rfkill_wlan_exit(void);
++
++#endif
+diff -Naur a/wl_cfg80211.c b/wl_cfg80211.c
+--- a/wl_cfg80211.c	2026-10-09 10:14:33.138572223 -0300
++++ b/wl_cfg80211.c	2026-10-09 14:03:21.000000000 -0300
+@@ -591,6 +591,13 @@
+ /*
+  * cfg80211_ops api/callback list
+  */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++static s32 wl_cfg80211_set_wiphy_params_mr(struct wiphy *wiphy, int radio_idx, u32 changed);
++static s32 wl_cfg80211_set_tx_power_mr(struct wiphy *wiphy, struct wireless_dev *wdev,
++	int radio_idx, enum nl80211_tx_power_setting type, int dbm);
++static s32 wl_cfg80211_get_tx_power_mr(struct wiphy *wiphy, struct wireless_dev *wdev,
++	int radio_idx, unsigned int link_id, int *dbm);
++#endif /* >= 6.17 */
+ static s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed);
+ #ifdef WLAIBSS_MCHAN
+ static bcm_struct_cfgdev* bcm_cfg80211_add_ibss_if(struct wiphy *wiphy, char *name);
+@@ -3405,6 +3412,22 @@
+ 	return err;
+ }
+ 
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++static s32 wl_cfg80211_set_wiphy_params_mr(struct wiphy *wiphy, int radio_idx, u32 changed)
++{
++	return wl_cfg80211_set_wiphy_params(wiphy, changed);
++}
++static s32 wl_cfg80211_set_tx_power_mr(struct wiphy *wiphy, struct wireless_dev *wdev,
++	int radio_idx, enum nl80211_tx_power_setting type, int dbm)
++{
++	return wl_cfg80211_set_tx_power(wiphy, wdev, type, dbm);
++}
++static s32 wl_cfg80211_get_tx_power_mr(struct wiphy *wiphy, struct wireless_dev *wdev,
++	int radio_idx, unsigned int link_id, int *dbm)
++{
++	return wl_cfg80211_get_tx_power(wiphy, wdev, dbm);
++}
++#endif /* >= 6.17 */
+ static s32 wl_cfg80211_set_wiphy_params(struct wiphy *wiphy, u32 changed)
+ {
+ 	struct bcm_cfg80211 *cfg = (struct bcm_cfg80211 *)wiphy_priv(wiphy);
+@@ -12033,13 +12056,22 @@
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
+ 	.abort_scan = wl_cfg80211_abort_scan,
+ #endif /* (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0)) */
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++	.set_wiphy_params = wl_cfg80211_set_wiphy_params_mr,
++#else
+ 	.set_wiphy_params = wl_cfg80211_set_wiphy_params,
++#endif 
+ 	.join_ibss = wl_cfg80211_join_ibss,
+ 	.leave_ibss = wl_cfg80211_leave_ibss,
+ 	.get_station = wl_cfg80211_get_station,
+ 	.dump_station = wl_cfg80211_dump_station,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
++	.set_tx_power = wl_cfg80211_set_tx_power_mr,
++	.get_tx_power = wl_cfg80211_get_tx_power_mr,
++#else
+ 	.set_tx_power = wl_cfg80211_set_tx_power,
+ 	.get_tx_power = wl_cfg80211_get_tx_power,
++#endif 
+ 	.add_key = wl_cfg80211_add_key,
+ 	.del_key = wl_cfg80211_del_key,
+ 	.get_key = wl_cfg80211_get_key,
+@@ -13232,6 +13264,18 @@
+ #endif
+ 
+ 	/* Now we can register wiphy with cfg80211 module */
++	{
++		int _b;
++		for (_b = 0; _b < NUM_NL80211_BANDS; _b++) {
++			struct ieee80211_supported_band *_sb = wdev->wiphy->bands[_b];
++			if (_sb)
++				printk("SYNDBG band[%d]=%px chans=%px n=%d iftd=%px nift=%d\n",
++					_b, _sb, _sb->channels, _sb->n_channels,
++					_sb->iftype_data, _sb->n_iftype_data);
++			else
++				printk("SYNDBG band[%d]=NULL\n", _b);
++		}
++	}
+ 	err = wiphy_register(wdev->wiphy);
+ 	if (unlikely(err < 0)) {
+ 		WL_ERR(("Couldn not register wiphy device (%d)\n", err));
+@@ -19949,6 +19993,9 @@
+ 
+ 	wiphy = bcmcfg_to_wiphy(cfg);
+ 	nband = bandlist[0];
++	printk(KERN_INFO "SYNDBG2 nband=%u b1=%u b2=%u b3=%u cur_band=%d nch2g=%d nch5g=%d\n",
++		bandlist[0], bandlist[1], bandlist[2], bandlist[3], cur_band,
++		__wl_band_2ghz.n_channels, __wl_band_5ghz_a.n_channels);
+ 
+ 	wiphy->available_antennas_tx = txchain;
+ 	wiphy->available_antennas_rx = rxchain;
+diff -Naur a/wl_cfgvif.c b/wl_cfgvif.c
+--- a/wl_cfgvif.c	2026-10-09 10:14:33.148572215 -0300
++++ b/wl_cfgvif.c	2026-10-09 11:26:43.000000000 -0300
+@@ -5987,7 +5987,9 @@
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION (3, 8, 0))
+ 	freq = chandef.chan ? chandef.chan->center_freq : chandef.center_freq1;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) || \
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
++	cfg80211_ch_switch_notify(dev, &chandef, 0);
++#elif LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0) || \
+ 		((ANDROID_VERSION >= 13) && (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 94)))
+ 	cfg80211_ch_switch_notify(dev, &chandef, 0, 0);
+ #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 2) || defined(CFG80211_BKPORT_MLO)
