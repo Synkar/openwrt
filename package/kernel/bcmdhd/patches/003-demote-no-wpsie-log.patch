@@ -1,0 +1,20 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] bcmdhd: demote "No WPSIE in beacon" log to debug
+
+wl_cfg80211_hostapd_sec() logs an error every beacon refresh (~6 s) when
+the AP beacon carries no WPS IE, but a WPS IE is optional (hostapd does
+not add one unless configured). The same condition is already logged at
+debug level in the beacon parse path. Demote to WL_DBG to stop the
+kernel log spam; nothing else changes.
+
+--- a/wl_cfgvif.c
++++ b/wl_cfgvif.c
+@@ -4062,7 +4062,7 @@
+ 			}
+ 		}
+ 	} else {
+-		WL_ERR(("No WPSIE in beacon \n"));
++		WL_DBG(("No WPSIE in beacon \n"));
+ 	}
+ 	return 0;
+ }
