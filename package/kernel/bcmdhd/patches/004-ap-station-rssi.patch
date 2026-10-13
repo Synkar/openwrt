@@ -1,0 +1,38 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] bcmdhd: report per-station RSSI in AP mode get_station
+
+wl_cfg80211_get_station() fills only inactive/connected time for AP-mode
+stations, so assoclist entries come out without a signal. LuCI (and
+libiwinfo) then show "--- dBm" / "no clients associated" even with
+connected stations.
+
+Query WLC_GET_RSSI with the station address (same pattern already used
+in the STA branch) and fill sinfo->signal/signal_avg. A failed RSSI
+query does not fail the rest of the station info.
+
+--- a/wl_cfg80211.c
++++ b/wl_cfg80211.c
+--- a/wl_cfg80211.c	2026-10-13 16:27:56.848594178 -0300
++++ b/wl_cfg80211.c	2026-10-13 16:27:56.887823635 -0300
+@@ -9098,6 +9098,21 @@
+ 				sinfo->connected_time = sta->in;
+ 			}
+ #endif
++			{
++				scb_val_t scb_val;
++				s32 rssi_err;
++
++				bzero(&scb_val, sizeof(scb_val_t));
++				memcpy(&scb_val.ea, mac, ETH_ALEN);
++				rssi_err = wldev_ioctl_get(dev, WLC_GET_RSSI,
++					&scb_val, sizeof(scb_val_t));
++				if (!rssi_err) {
++					sinfo->filled |= STA_INFO_BIT(INFO_SIGNAL) |
++						STA_INFO_BIT(INFO_SIGNAL_AVG);
++					sinfo->signal = dtoh32(scb_val.val);
++					sinfo->signal_avg = sinfo->signal;
++				}
++			}
+ 			WL_INFORM_MEM(("STA %s, flags 0x%x, idle time %ds, connected time %ds\n",
+ 				bcm_ether_ntoa((const struct ether_addr *)mac, eabuf),
+ 				sta->flags, sta->idle, sta->in));
