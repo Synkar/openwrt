@@ -1,0 +1,46 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] bcmdhd: guard country-code ioctls until the dongle is ready
+
+cfg80211 processes pending regulatory requests from the reg_todo
+workqueue as soon as wiphy_register() runs, which in this driver happens
+while module init is still downloading firmware. With a pending user
+country request (netifd runs "iw reg set" at boot), the notifier then
+issues an ioctl against the uninitialized dhd proto layer and calls a
+NULL ring callback (kernel Oops, host lockup).
+
+Return -ENODEV from wl_cfg80211_set_country_code() until the primary
+netdev exists and the bus reached DHD_BUS_DATA (firmware up, ioctl
+rings initialized). Country settings issued afterwards work as before.
+
+--- a/wl_cfg80211.c
++++ b/wl_cfg80211.c
+@@ -12457,11 +12457,25 @@
+ wl_cfg80211_set_country_code(struct net_device *net, char *country_code,
+ 	bool notify, bool user_enforced, int revinfo)
+ {
+-	struct dhd_pub *dhd = dhd_get_pub(net);
++	struct dhd_pub *dhd;
+ 	s32 ret = BCME_OK;
+-	struct wireless_dev *wdev = ndev_to_wdev(net);
+-	struct wiphy *wiphy = wdev->wiphy;
+-	struct bcm_cfg80211 *cfg = wiphy_priv(wiphy);
++	struct wireless_dev *wdev;
++	struct wiphy *wiphy;
++	struct bcm_cfg80211 *cfg;
++
++	if (!net) {
++		WL_ERR(("country set: netdev not ready, skip\n"));
++		return -ENODEV;
++	}
++	dhd = dhd_get_pub(net);
++	if (!dhd || dhd->busstate != DHD_BUS_DATA) {
++		WL_ERR(("country set: dongle not ready (busstate=%d), skip\n",
++			dhd ? dhd->busstate : -1));
++		return -ENODEV;
++	}
++	wdev = ndev_to_wdev(net);
++	wiphy = wdev->wiphy;
++	cfg = wiphy_priv(wiphy);
+ 	BCM_REFERENCE(cfg);
+ 
+ #ifdef WL_AUTO_COUNTRY
