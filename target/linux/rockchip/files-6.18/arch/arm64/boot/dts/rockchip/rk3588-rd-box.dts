@@ -482,6 +482,46 @@
 	status = "okay";
 };
 
+/* WS2812 on GPIO4_B3 (VCCIO6 3V3), using function I2S1_SDO2_M0 as per the RD-BOX PDF.
+ * The default pinctrl for i2s1_8ch also includes PA2, PA5, PA6, PA7, and PB2
+ * (PCIe reset, M.2 enable, LED, fan, and SPI CAN IRQ), but only SDO2 is used here.
+ * The stereo pair (data0) is routed to SDO2. Without trcm-sync-tx-only, 
+ * starting does not reset the block, so the route remains. The spdif-dit codec
+ * is virtual: it just creates the PCM hw:ws2812 for the I2S master. */
+&i2s1_8ch {
+	/delete-property/ rockchip,trcm-sync-tx-only;
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2s1m0_sdo2>;
+	assigned-clocks = <&cru CLK_I2S1_8CH_TX_SRC>;
+	assigned-clock-parents = <&cru PLL_AUPLL>;
+	rockchip,i2s-tx-route = <1 2 0 3>;
+	status = "okay";
+};
+
+/ {
+	ws2812_codec: ws2812-codec {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	ws2812-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "ws2812";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,bitclock-master = <&ws2812_cpu>;
+		simple-audio-card,frame-master = <&ws2812_cpu>;
+
+		ws2812_cpu: simple-audio-card,cpu {
+			sound-dai = <&i2s1_8ch>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&ws2812_codec>;
+		};
+	};
+};
+
 &i2c7 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c7m0_xfer>;
