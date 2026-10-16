@@ -4,26 +4,26 @@
  *
  * RD-BOX-RK3588 board DTS (mainline bindings).
  *
- * Portado do DTS do SDK vendor (kernel 6.1 fork) para bindings mainline.
- * Referências: rk3588-rock-5b.dtsi (mesmo SoC rk3588 + PMIC rk806 em spi2),
- *   rp-rk3588-board.dtsi + rd-box-rk3588.dts do SDK.
+ * Ported from the vendor SDK DTS (kernel 6.1 fork) to mainline bindings.
+ * References: rk3588-rock-5b.dtsi (same rk3588 SoC + rk806 PMIC on spi2),
+ *   rp-rk3588-board.dtsi + rd-box-rk3588.dts from the SDK.
  *
- * Mapeamento vendor -> mainline:
+ * Vendor -> mainline mapping:
  *   rp_power.led/usb/otg/hub/4g  -> gpio-leds / fixed-regulator / gpio-hog
  *   fan_gpio_control             -> gpio-fan
  *   stm706 (watchdog)            -> linux,wdt-gpio
  *   rp-keys                      -> adc-keys
  *   wireless-wlan/bt (platdata)  -> PCIe enumeration (brcmfmac) / brcm bluetooth
  *
- * TODO Fase 4 (validação em hardware):
- *   - polaridades dos GPIOs de power/reset (usb-host, otg, hub, 4g)
- *   - bring-up BT: hci_bcm probe + load do FW BCM4362A2.hcd + HCI up
- *     (binding corrigido: compatible brcm,bcm43438-bt + clock lpo do hym8563 +
- *      CONFIG_BT_HCIUART_BCM; falta validar em HW)
- *   - bring-up WAN real do synkar-netrole (uplink DHCP + masquerade)
- *   - audio HDMI (hdmi0_sound: deferred probe do asoc-simple-card)
+ * TODO phase 4 (hardware validation):
+ *   - power/reset GPIO polarities (usb-host, otg, hub, 4g)
+ *   - BT bring-up: hci_bcm probe + BCM4362A2.hcd firmware load + HCI up
+ *     (binding fixed: compatible brcm,bcm43438-bt + hym8563 lpo clock +
+ *      CONFIG_BT_HCIUART_BCM; still needs HW validation)
+ *   - real WAN bring-up of synkar-netrole (DHCP uplink + masquerade)
+ *   - HDMI audio (hdmi0_sound: deferred probe of asoc-simple-card)
  *
- * Resolvido: CAN0 (rockchip_canfd bind + can0 UP 500kbps; ver no can0).
+ * Done: CAN0 (rockchip_canfd bind + can0 UP at 500 kbps; see the can0 node).
  */
 
 /dts-v1/;
@@ -178,8 +178,8 @@
 		};
 	};
 
-	/* stm706 -> watchdog externo via GPIO. wdt_gpio=gpio1 PB2 (feed/keepalive),
-	 * reset_gpio=gpio1 PB1 eh saida hardwired de reset do IC (nao dirigida). */
+	/* stm706 -> external GPIO watchdog. wdt_gpio = gpio1 PB2 (feed/keepalive).
+	 * reset_gpio = gpio1 PB1 is the IC's hardwired reset output (not driven). */
 	gpio_watchdog: watchdog {
 		compatible = "linux,wdt-gpio";
 		gpios = <&gpio1 RK_PB2 GPIO_ACTIVE_HIGH>;
@@ -211,7 +211,7 @@
 		vin-supply = <&avcc_1v8_s0>;
 	};
 
-	/* rp-wifi-bt-pcie-ap6275p: vcc3v3 do módulo WiFi, enable gpio0 PB2 */
+	/* rp-wifi-bt-pcie-ap6275p: WiFi module vcc3v3, enable gpio0 PB2 */
 	vcc3v3_pcie_wifi: regulator-vcc3v3-pcie-wifi {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc3v3_pcie_wifi";
@@ -225,7 +225,7 @@
 		vin-supply = <&vcc_3v3_s3>;
 	};
 
-	/* rp-pcie2x1l1-m2: vcc3v3 do slot M.2, enable gpio4 PA5 (RD_BOX_RK3588) */
+	/* rp-pcie2x1l1-m2: M.2 slot vcc3v3, enable gpio4 PA5 (RD_BOX_RK3588) */
 	vcc3v3_m2: regulator-vcc3v3-m2 {
 		compatible = "regulator-fixed";
 		regulator-name = "vcc3v3_m2";
@@ -254,8 +254,8 @@
 		vin-supply = <&vcc5v0_usb>;
 	};
 
-	/* rp_power: otg-power gpio1 PA2. always-on: nenhum no consome o
-	 * VBUS; sem ele o regulador fica disabled (porta morta). */
+	/* rp_power: otg-power gpio1 PA2. always-on: no node consumes VBUS;
+	 * without it the regulator stays disabled (dead port). */
 	vbus5v0_otg: regulator-vbus5v0-otg {
 		compatible = "regulator-fixed";
 		regulator-name = "vbus5v0_otg";
@@ -287,23 +287,23 @@
 	};
 
 	/*
-	 * CAN0/CAN1: o IP CAN do rk3588 equivale ao rk3568v2. Os nos can0/can1
-	 * NAO existem no rk3588-base.dtsi mainline (apenas o pinctrl can0m0/can1m0
-	 * existe em rk3588-base-pinctrl.dtsi), entao definimos os nos completos
-	 * aqui. Driver: rockchip_canfd (CONFIG_CAN_ROCKCHIP_CANFD) -> compatible
-	 * "rockchip,rk3568v2-canfd" (o driver mainline nao tem compatible rk3588;
-	 * o vendor usava "rockchip,can-2.0" no BSP 6.1 fora-de-arvore).
+	 * CAN0/CAN1: the rk3588 CAN IP matches rk3568v2. The can0/can1 nodes
+	 * do NOT exist in mainline rk3588-base.dtsi (only the can0m0/can1m0
+	 * pinctrl exists in rk3588-base-pinctrl.dtsi), so the full nodes are
+	 * defined here. Driver: rockchip_canfd (CONFIG_CAN_ROCKCHIP_CANFD) ->
+	 * compatible "rockchip,rk3568v2-canfd" (mainline has no rk3588
+	 * compatible; the vendor used out-of-tree "rockchip,can-2.0" on BSP 6.1).
 	 *
-	 * interrupts: a GICv3 do rk3588 mainline é 4-cell (#interrupt-cells=<4>
-	 * em rk3588-base.dtsi), herdado da raiz. O 4o campo é o partition/PPI-mask
-	 * (0 para SPI). NAO usar a forma 3-cell do vendor (GIC 3-cell) senao o
-	 * parser de DT falha e platform_get_irq() devolve -ENXIO ("IRQ index 0
-	 * not found") — bug historico do bring-up da CAN0.
+	 * interrupts: mainline rk3588 GICv3 is 4-cell (#interrupt-cells = <4>
+	 * in rk3588-base.dtsi), inherited from the root. The 4th cell is the
+	 * partition/PPI mask (0 for SPI). Do not use the vendor 3-cell GIC
+	 * form, or the DT parser fails and platform_get_irq() returns -ENXIO
+	 * ("IRQ index 0 not found") — historical CAN0 bring-up bug.
 	 *
-	 * CAN1 fica DESABILITADO: can1m0 (gpio3 RK_PB5 = can1_rx_m0) é o MESMO
-	 * pino que gmac1_txen (eth0 RGMII), essencial para a ethernet primaria.
-	 * O vendor tampouco habilita can1 neste board. Se um 2o CAN existir no
-	 * hardware, precisara do mux can1m1 + validacao do esquemático.
+	 * CAN1 stays DISABLED: can1m0 (gpio3 RK_PB5 = can1_rx_m0) is the SAME
+	 * pin as gmac1_txen (eth0 RGMII), required for the primary Ethernet.
+	 * The vendor does not enable can1 on this board either. A second CAN
+	 * on the hardware would need the can1m1 mux plus a schematic check.
 	 */
 	can0: can@fea50000 {
 		compatible = "rockchip,rk3568v2-canfd";
@@ -332,7 +332,7 @@
 		assigned-clock-rates = <200000000>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&can1m0_pins>;
-		/* can1m0 conflita com gmac1_txen (gpio3 RK_PB5); ver comentario acima. */
+		/* can1m0 conflicts with gmac1_txen (gpio3 RK_PB5); see the comment above. */
 		status = "disabled";
 	};
 
@@ -376,13 +376,14 @@
 	cpu-supply = <&vdd_cpu_lit_s0>;
 };
 
-/* Ethernet primario: gmac1 RGMII (rp-eth-gmac1.dtsi). Timing preservado do vendor
- * (rgmii-rxid, clock input, tx_delay). Reset modernizado p/ o no phy (mainline).
+/* Primary Ethernet: gmac1 RGMII (rp-eth-gmac1.dtsi). Timing kept from the vendor
+ * (rgmii-rxid, clock input, tx_delay). Reset moved to the phy node (mainline).
  *
- * O grupo eth1_pins (eth1_refclko_25m, gpio3 PA6) é INDISPENSÁVEL: ele roteia o
- * clock de 25MHz gerado pelo CRU (REFCLKO25M_ETH1_OUT) ate o pino XTAL do PHY
- * RTL8211F. Sem ele o PHY fica sem clock e nao responde no MDIO, gerando
- * "cannot attach to PHY (-ENODEV)". O vendor chama esse grupo de "eth1_pins". */
+ * The eth1_pins group (eth1_refclko_25m, gpio3 PA6) is required: it routes the
+ * 25 MHz clock generated by the CRU (REFCLKO25M_ETH1_OUT) to the RTL8211F PHY
+ * XTAL pin. Without it the PHY has no clock and does not answer on MDIO,
+ * producing "cannot attach to PHY (-ENODEV)". The vendor names this group
+ * "eth1_pins". */
 &gmac1 {
 	phy-mode = "rgmii-rxid";
 	clock_in_out = "input";
@@ -402,16 +403,16 @@
 };
 
 &mdio1 {
-	/* RTL8211F (vendor: reset gpio3 PB7, 20ms assert / 100ms deassert).
-	 * O refclk 25MHz do PHY vem do CRU (REFCLKO25M_ETH1_OUT) roteado ao pino
-	 * XTAL do PHY pelo grupo eth1_pins/eth1_refclko_25m (gpio3 PA6) do &gmac1.
+	/* RTL8211F (vendor: reset gpio3 PB7, 20 ms assert / 100 ms deassert).
+	 * The PHY 25 MHz refclk comes from the CRU (REFCLKO25M_ETH1_OUT), routed
+	 * to the PHY XTAL pin by eth1_pins/eth1_refclko_25m (gpio3 PA6) on &gmac1.
 	 *
-	 * compatible "ethernet-phy-id001c.c916" (PHY-ID do RTL8211F): faz a phylib
-	 * criar o device SEM uma leitura MDIO prematura. Com o generico
-	 * "ethernet-phy-ieee802.3-c22" a phylib tenta ler o ID ANTES de aplicar o
-	 * reset-gpios; como o PHY esta em reset, a leitura falha (-ENODEV) e o device
-	 * nunca é criado (o reset-gpios fica "UNCLAIMED"). Mesmo padrao do
-	 * rk3588-evb1-v10.dts para o mesmo PHY RTL8211F. */
+	 * compatible "ethernet-phy-id001c.c916" (RTL8211F PHY ID) makes phylib
+	 * create the device WITHOUT a premature MDIO read. With the generic
+	 * "ethernet-phy-ieee802.3-c22", phylib tries to read the ID BEFORE applying
+	 * reset-gpios; the PHY is still in reset, the read fails (-ENODEV), and the
+	 * device is never created (reset-gpios stays "UNCLAIMED"). Same pattern as
+	 * rk3588-evb1-v10.dts for this RTL8211F. */
 	rgmii_phy1: ethernet-phy@1 {
 		compatible = "ethernet-phy-id001c.c916";
 		reg = <0x1>;
@@ -423,10 +424,11 @@
 };
 
 /* ===== HDMI0 (display + audio) ============================================
- * Portado de rk3588-evb1-v10.dts (bindings mainline). Diferenças vs SDK vendor:
- * o label do PHY é &hdptxphy0 (não &hdptxphy_hdmi0) e o &route_hdmi0
- * (vendor-specific) foi removido — mainline descreve o pipeline via grafo OF.
- * O dw-hdmi-qp pega o PHY por phandle (phys = <&hdptxphy0>) na base dtsi.
+ * Ported from rk3588-evb1-v10.dts (mainline bindings). Differences vs the
+ * vendor SDK: the PHY label is &hdptxphy0 (not &hdptxphy_hdmi0) and
+ * &route_hdmi0 (vendor-specific) was dropped — mainline describes the pipeline
+ * via the OF graph. dw-hdmi-qp takes the PHY by phandle (phys = <&hdptxphy0>)
+ * in the base dtsi.
  */
 &vop {
 	status = "okay";
@@ -464,7 +466,7 @@
 };
 
 /* HDMI audio: simple-audio-card (cpu = i2s5_8ch -> codec = hdmi0).
- * O nó hdmi0_sound já vem pré-wired na rk3588-base.dtsi; basta habilitar. */
+ * The hdmi0_sound node is already wired in rk3588-base.dtsi; only enable it. */
 &i2s5_8ch {
 	status = "okay";
 };
@@ -575,7 +577,7 @@
 	};
 };
 
-/* Combophys para os 3 slots PCIe */
+/* Combophy for the 3 PCIe slots */
 &combphy0_ps {
 	status = "okay";
 };
@@ -624,12 +626,13 @@
 
 
 /* pcie2x1l0: WiFi ap6275p (rp-wifi-bt-pcie-ap6275p)
- * O BCM43752 (AP6275P) precisa do clock LPO de 32.768kHz para o FW inicializar
- * (sem ele o ARM eh solto mas o FW nunca escreve a sharedram sentinel -> "FW
- * failed to initialize"). Mainline brcmfmac adquire esse clock via DT, no nó do
- * dispositivo PCI, pelo nome "lpo" (brcmf_of_probe -> devm_clk_get...("lpo")).
- * Mesmo binding do armsom-sige7 (AP6275P + RK3588 + hym8563, WiFi funcional).
- * BDF observado: root port 0002:20:00.0 (bus 0x20), wifi 0002:21:00.0 (bus 0x21).
+ * The BCM43752 (AP6275P) needs the 32.768 kHz LPO clock for the firmware to
+ * start (without it the ARM is released but the firmware never writes the
+ * shared-RAM sentinel -> "FW failed to initialize"). Mainline brcmfmac gets
+ * that clock from DT, on the PCI device node, by the name "lpo"
+ * (brcmf_of_probe -> devm_clk_get...("lpo")).
+ * Same binding as armsom-sige7 (AP6275P + RK3588 + hym8563, working WiFi).
+ * Observed BDF: root port 0002:20:00.0 (bus 0x20), wifi 0002:21:00.0 (bus 0x21).
  */
 &pcie2x1l0 {
 	reset-gpios = <&gpio1 RK_PB4 GPIO_ACTIVE_HIGH>;
@@ -726,7 +729,7 @@
 	};
 };
 
-/* i2c3 habilitado vazio; 400 kHz para o BNO080 em userspace. */
+/* i2c3 enabled with no children; 400 kHz for the BNO080 in userspace. */
 &i2c3 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c3m0_xfer>;
@@ -734,7 +737,7 @@
 	status = "okay";
 };
 
-/* RTC hym8563 no i2c4 (rd-box-rk3588.dts) */
+/* hym8563 RTC on i2c4 (rd-box-rk3588.dts) */
 &i2c4 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c4m1_xfer>;
@@ -748,7 +751,7 @@
 	};
 };
 
-/* PMIC rk806 em spi2 (mesma topologia do rk3588-rock-5b) */
+/* rk806 PMIC on spi2 (same topology as rk3588-rock-5b) */
 &spi2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi2m2_cs0 &spi2m2_pins>;
@@ -1099,7 +1102,7 @@
 	status = "okay";
 };
 
-/* uart2 livre para uso da aplicacao (nao e mais console do SO) */
+/* uart2 left free for the application (no longer the OS console) */
 &uart2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart2m0_xfer>;
@@ -1130,32 +1133,34 @@
 	status = "okay";
 };
 
-/* uart9: barramento BT do modulo ap6275p (chip BCM4362A2). Portado do vendor
- * rp-wifi-bt-pcie-ap6275p.dtsi (bluetooth-platdata) para bindings mainline do
- * hci_bcm, seguindo o rk3588-armsom-sige7 (mesmo AP6275P + hym8563). GPIOs
- * conforme o vendor: reset/BT_REG_ON = gpio0 PA0, wake/BT_WAKE = gpio2 PB3,
+/* uart9: BT bus of the ap6275p module (BCM4362A2). Ported from the vendor
+ * rp-wifi-bt-pcie-ap6275p.dtsi (bluetooth-platdata) to mainline hci_bcm
+ * bindings, following rk3588-armsom-sige7 (same AP6275P + hym8563). GPIOs
+ * match the vendor: reset/BT_REG_ON = gpio0 PA0, wake/BT_WAKE = gpio2 PB3,
  * host-wakeup/HOST_WAKE = gpio2 PB0.
  *
- * compatible: o hci_bcm mainline NAO tem entry para o BCM4362A2 na sua tabela
- * of_match — "brcm,bcm4362a2" (usado antes deste commit) nunca fazia probe do
- * driver. Usamos "brcm,bcm43438-bt", mesma estrategia do armsom-sige7 com o
- * MESMO chip: o driver trata todos os chips Broadcom UART (H4 + set_baud +
- * load FW) da mesma forma e carrega o BCM4362A2.hcd via request_firmware.
+ * compatible: mainline hci_bcm has NO of_match entry for the BCM4362A2 —
+ * "brcm,bcm4362a2" (used before this change) never probed the driver. Use
+ * "brcm,bcm43438-bt", the same approach as armsom-sige7 for the SAME chip:
+ * the driver treats every Broadcom UART chip the same way (H4 + set_baud +
+ * firmware load) and loads BCM4362A2.hcd via request_firmware.
  *
- * Clock LPO 32.768kHz do RTC hym8563: o hci_bcm o adquire por
- * devm_clk_get_optional(dev,"lpo") (brcm,bluetooth.yaml). Sem ele o FW do
- * BCM4362A2 nao inicializa (mesma dependencia do brcmfmac no lado WiFi).
+ * 32.768 kHz LPO clock from the hym8563 RTC: hci_bcm gets it through
+ * devm_clk_get_optional(dev, "lpo") (brcm,bluetooth.yaml). Without it the
+ * BCM4362A2 firmware does not start (same dependency as brcmfmac on WiFi).
  *
- * host-wakeup: declarado como interrupcao dedicada (interrupts +
- * interrupt-names="host-wakeup"), em vez do "host-wakeup-gpios" deprecated no
- * binding (brcm,bluetooth.yaml); mesmo padrao do armsom-sige7.
+ * host-wakeup: declared as a dedicated interrupt (interrupts +
+ * interrupt-names = "host-wakeup"), instead of the deprecated
+ * "host-wakeup-gpios" in the binding (brcm,bluetooth.yaml); same pattern as
+ * armsom-sige7.
  *
- * RTS/CTS: muxados como funcao UART (func 10), NAO como GPIO. O mainline
- * hci_bcm controla o flow-control via o MCR do 8250 (hci_uart_set_flow_control
- * em bcm_suspend/resume_device), ao inves do "RTS-gpio switching" do vendor
- * platdata (comutacao de pinctrl entre default e rts_gpio). Os grupos
- * uart9m0_ctsn/uart9m0_rtsn NAO existem no rk3588-base-pinctrl.dtsi mainline
- * (apenas as variantes m1/m2), entao sao definidos no &pinctrl deste board. */
+ * RTS/CTS: muxed as the UART function (func 10), NOT as GPIO. Mainline
+ * hci_bcm drives flow control through the 8250 MCR
+ * (hci_uart_set_flow_control in bcm_suspend/resume_device), instead of the
+ * vendor platdata "RTS-gpio switching" (pinctrl toggle between default and
+ * rts_gpio). The uart9m0_ctsn/uart9m0_rtsn groups do NOT exist in mainline
+ * rk3588-base-pinctrl.dtsi (only the m1/m2 variants), so they are defined in
+ * this board's &pinctrl. */
 &uart9 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart9m0_xfer &uart9m0_ctsn &uart9m0_rtsn>;
@@ -1178,20 +1183,22 @@
 	};
 };
 
-/* spi0 M3: dois MCP2515 no mesmo barramento.
- * CLK GPIO3_D3, MISO GPIO3_D1, MOSI GPIO3_D2 (grupo spi0m3_pins).
- * Os dois CS são GPIO. O spi-rockchip liga o bit SER0 em todo acesso cujo
- * CS é GPIO, porque o controlador só gera SCLK com um bit de SER ativo.
- * Com GPIO3_D4 em spi0m3_cs0, esse bit selecionava o MCP2515 da can1 junto
- * com o da can2 e os dois respondiam no MISO. Em GPIO, o SER0 não sai em
- * nenhum pino.
- *   CS0 GPIO3_D4: placa de acessório (can1), 500 kbit/s.
- *   CS1 GPIO3_C7: IMU (can2), 500 kbit/s.
- * GPIO3_D5 é spi0_cs1_m3 no pinctrl do SoC e o INT da can1, então
- * spi0m3_cs1 não entra no pinctrl. O CS1 nativo não serve de substituto.
- * 1 Mbit/s não cabe: o MCP2515 divide o cristal de 8 MHz por 2.
- * Cristal dos dois módulos: spican_osc = 8 MHz.
- * INT é ativo em nível baixo; borda perdida deixava o driver surdo. */
+/* spi0 M3: two MCP2515 controllers on one bus.
+ * CLK GPIO3_D3, MISO GPIO3_D1, MOSI GPIO3_D2 (spi0m3_pins).
+ * CS0 GPIO3_D4 and CS1 GPIO3_C7 are both GPIO, active-low.
+ *
+ * The controller chip select and a GPIO chip select cannot be used
+ * together. spi-rockchip sets SER bit 0 on every transfer whose chip
+ * select is a GPIO, because the controller only clocks SCLK while an
+ * SER bit is set. If that pin stays muxed as the native CS function,
+ * the bit selects the native-CS slave at the same time as the GPIO-CS
+ * slave and both drive MISO. GPIO3_D4 is muxed as GPIO, so SER bit 0
+ * is not wired to a pin.
+ *
+ * GPIO3_D5 is spi0_cs1_m3 in the SoC pinctrl and is an interrupt here,
+ * so spi0m3_cs1 stays out of pinctrl. Native CS1 is not a substitute.
+ * Both modules share an 8 MHz oscillator. The MCP2515 divides it by 2,
+ * so 1 Mbit/s is out of range. INT is open-drain and active-low. */
 &spi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi0m3_pins &spi0_cs_gpios &spican_int_pins>;
@@ -1242,7 +1249,7 @@
 	status = "okay";
 };
 
-/* USB (baseado em rk3588-rock-5b; RD-BOX: 1x OTG type-A + 2x USB2 host + 1x USB3 host) */
+/* USB (based on rk3588-rock-5b; RD-BOX: 1x OTG type-A + 2x USB2 host + 1x USB3 host) */
 &u2phy0 {
 	status = "okay";
 };
@@ -1316,13 +1323,13 @@
 };
 
 &pinctrl {
-	/* O grupo eth1_pins (eth1_refclko_25m, gpio3 PA6) já é definido pelo
-	 * rk3588-base-pinctrl.dtsi; basta referenciá-lo em &gmac1 pinctrl-0. */
+	/* The eth1_pins group (eth1_refclko_25m, gpio3 PA6) is already defined by
+	 * rk3588-base-pinctrl.dtsi; just reference it from &gmac1 pinctrl-0. */
 
-	/* uart9 RTS/CTS em modo m0 (gpio4 PC4=RTS, gpio4 PC5=CTS). Esses grupos
-	 * NAO existem no rk3588-base-pinctrl.dtsi mainline (apenas m1/m2), entao
-	 * sao definidos aqui com o mesmo mapeamento do pinctrl vendor
-	 * (rk3588-vccio3-pinctrl.dtsi). Pinconf pcfg_pull_none, conforme o vendor. */
+	/* uart9 RTS/CTS in m0 mode (gpio4 PC4 = RTS, gpio4 PC5 = CTS). These
+	 * groups do NOT exist in mainline rk3588-base-pinctrl.dtsi (only m1/m2),
+	 * so they are defined here with the vendor pinctrl mapping
+	 * (rk3588-vccio3-pinctrl.dtsi). Pinconf is pcfg_pull_none, as in the vendor. */
 	uart9 {
 		uart9m0_ctsn: uart9m0-ctsn {
 			rockchip,pins = <4 RK_PC5 10 &pcfg_pull_none>;
@@ -1333,8 +1340,8 @@
 		};
 	};
 
-	/* GPIOs do BT do ap6275p (pinconf conforme o vendor rp-wifi-bt-pcie-
-	 * ap6275p.dtsi, grupo bt_gpio). */
+	/* ap6275p BT GPIOs (pinconf from the vendor rp-wifi-bt-pcie-ap6275p.dtsi,
+	 * bt_gpio group). */
 	wireless-bluetooth {
 		bt_reset: bt-reset {
 			rockchip,pins = <0 RK_PA0 RK_FUNC_GPIO &pcfg_pull_none>;
@@ -1393,6 +1400,7 @@
 		};
 	};
 
+	/* CS pins stay GPIO. Native SPI CS and GPIO CS cannot share this bus. */
 	spi0_custom_cs {
 		spi0_cs_gpios: spi0-cs-gpios {
 			rockchip,pins =
@@ -1408,7 +1416,7 @@
 	};
 };
 
-/* rp_power: usb-hub-reset gpio3 PB2 -> deassert high no boot. */
+/* rp_power: usb-hub-reset gpio3 PB2 -> deasserted high at boot. */
 &gpio3 {
 	usb-hub-reset-hog {
 		gpio-hog;
