@@ -336,10 +336,32 @@
 		status = "disabled";
 	};
 
+	/* One 16 MHz crystal per MCP2515. Both nodes use this rate for bit timing. */
 	spican_osc: spican_osc {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <8000000>;
+		clock-frequency = <16000000>;
+	};
+
+	/* CAN1_SPI_RESET and CAN2_SPI_RESET are the MCP2515 RESET# pins.
+	 * Active-low: the chip stays in reset while the line is high, which
+	 * made mcp251x time out in "didn't enter in conf mode after reset".
+	 * mcp251x enables vdd on probe; that drives the pin low and waits
+	 * startup-delay-us for the 16 MHz oscillator. GPIO_ACTIVE_LOW is the
+	 * polarity. Omit enable-active-high: without it, gpiolib forces
+	 * regulator-fixed active-low unless the specifier already says so. */
+	spican0_en: regulator-spican0-en {
+		compatible = "regulator-fixed";
+		regulator-name = "spican0-enable";
+		gpio = <&io_expander 4 GPIO_ACTIVE_LOW>;
+		startup-delay-us = <5000>;
+	};
+
+	spican1_en: regulator-spican1-en {
+		compatible = "regulator-fixed";
+		regulator-name = "spican1-enable";
+		gpio = <&io_expander 5 GPIO_ACTIVE_LOW>;
+		startup-delay-us = <5000>;
 	};
 
 };
@@ -486,7 +508,7 @@
 
 /* WS2812 on GPIO4_B3 (VCCIO6 3V3), using function I2S1_SDO2_M0 as per the RD-BOX PDF.
  * The default pinctrl for i2s1_8ch also includes PA2, PA5, PA6, PA7, and PB2
- * (PCIe reset, M.2 enable, LED, fan, and SPI CAN IRQ), but only SDO2 is used here.
+ * (PCIe reset, M.2 enable, LED, fan, and NFC RX), but only SDO2 is used here.
  * The stereo pair (data0) is routed to SDO2. Without trcm-sync-tx-only, 
  * starting does not reset the block, so the route remains. The spdif-dit codec
  * is virtual: it just creates the PCM hw:ws2812 for the I2S master. */
@@ -729,12 +751,44 @@
 	};
 };
 
-/* i2c3 enabled with no children; 400 kHz for the BNO080 in userspace. */
+/* i2c3, 400 kHz. Two devices share the bus:
+ *   PCA9554 at 0x20 (A2:A0 tied low). INT is GPIO0_D3, open-drain,
+ *   level-low. IO0..IO7 are push-pull outputs.
+ *   BNO080 in userspace at the secondary address 0x4B. It cannot share
+ *   0x20. I2C_IMU_nRESET (IO3) stays free: bno080 drives it, including
+ *   holding the part in reset while the node is disabled.
+ * CAN1_SPI_RESET and CAN2_SPI_RESET are the active-low RESET# lines of
+ * spican0 and spican1.
+ * ToF, lidar, IMU-CAN, LED and NFC power are not referenced by a
+ * device-tree node, so those lines stay free for userspace. */
 &i2c3 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c3m0_xfer>;
 	clock-frequency = <400000>;
 	status = "okay";
+
+	io_expander: gpio@20 {
+		compatible = "nxp,pca9554";
+		reg = <0x20>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PD3 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&io_exp_int>;
+		/* IO4/IO5 belong to spican0/spican1. Every other line is free
+		 * for userspace, including I2C_IMU_nRESET. */
+		gpio-line-names = "ToF_PWR-On-Off",
+				  "LIDAR_PWR-On-Off",
+				  "IMU_CAN_PWR-On-Off",
+				  "I2C_IMU_nRESET",
+				  "CAN1_SPI_RESET",
+				  "CAN2_SPI_RESET",
+				  "LED_PWR-On-Off",
+				  "NFC_PWR-On-Off";
+	};
 };
 
 /* hym8563 RTC on i2c4 (rd-box-rk3588.dts) */
@@ -1195,10 +1249,13 @@
  * slave and both drive MISO. GPIO3_D4 is muxed as GPIO, so SER bit 0
  * is not wired to a pin.
  *
- * GPIO3_D5 is spi0_cs1_m3 in the SoC pinctrl and is an interrupt here,
+ * GPIO3_D5 is spi0_cs1_m3 in the SoC pinctrl and is the NFC TX line,
  * so spi0m3_cs1 stays out of pinctrl. Native CS1 is not a substitute.
- * Both modules share an 8 MHz oscillator. The MCP2515 divides it by 2,
- * so 1 Mbit/s is out of range. INT is open-drain and active-low. */
+ * GPIO4_B2 is the NFC RX line. spican0 INT is GPIO3_C4 and spican1 INT
+ * is GPIO3_C5. Both stay GPIO, open-drain, active-low, and are not muxed
+ * as can2m0 or uart5m1. Each module has its own 16 MHz crystal, so
+ * spican1 does not depend on spican0 CLKOUT.
+ * can-link.sh brings spican1 up at 1 Mbit/s and spican0 at 500 kbit/s. */
 &spi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi0m3_pins &spi0_cs_gpios &spican_int_pins>;
@@ -1212,8 +1269,9 @@
 		reg = <0>;
 		spi-max-frequency = <10000000>;
 		clocks = <&spican_osc>;
+		vdd-supply = <&spican0_en>;
 		interrupt-parent = <&gpio3>;
-		interrupts = <RK_PD5 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <RK_PC4 IRQ_TYPE_LEVEL_LOW>;
 	};
 
 	spican1: can@1 {
@@ -1221,8 +1279,9 @@
 		reg = <1>;
 		spi-max-frequency = <10000000>;
 		clocks = <&spican_osc>;
-		interrupt-parent = <&gpio4>;
-		interrupts = <RK_PB2 IRQ_TYPE_LEVEL_LOW>;
+		vdd-supply = <&spican1_en>;
+		interrupt-parent = <&gpio3>;
+		interrupts = <RK_PC5 IRQ_TYPE_LEVEL_LOW>;
 	};
 };
 
@@ -1400,6 +1459,13 @@
 		};
 	};
 
+	/* PCA9554 INT on GPIO0_D3. Open-drain, so the SoC pulls it up. */
+	io-expander {
+		io_exp_int: io-exp-int {
+			rockchip,pins = <0 RK_PD3 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
 	/* CS pins stay GPIO. Native SPI CS and GPIO CS cannot share this bus. */
 	spi0_custom_cs {
 		spi0_cs_gpios: spi0-cs-gpios {
@@ -1410,18 +1476,54 @@
 
 		spican_int_pins: spican-int-pins {
 			rockchip,pins =
+				<3 RK_PC4 RK_FUNC_GPIO &pcfg_pull_up>,
+				<3 RK_PC5 RK_FUNC_GPIO &pcfg_pull_up>;
+		};
+	};
+
+	/* NFC on J428. GPIO3_D5 is TX, GPIO4_B2 is RX. Not a UART pair.
+	 * Pull-ups hold both idle-high until the nfc task requests them. */
+	nfc {
+		nfc_pins: nfc-pins {
+			rockchip,pins =
 				<3 RK_PD5 RK_FUNC_GPIO &pcfg_pull_up>,
 				<4 RK_PB2 RK_FUNC_GPIO &pcfg_pull_up>;
 		};
 	};
 };
 
-/* rp_power: usb-hub-reset gpio3 PB2 -> deasserted high at boot. */
+/* Applies the NFC pinmux only. The nfc task owns both lines. */
+/ {
+	nfc_pinmux: regulator-nfc-pinmux {
+		compatible = "regulator-fixed";
+		regulator-name = "nfc-pinmux";
+		regulator-always-on;
+		regulator-boot-on;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&nfc_pins>;
+	};
+};
+
+/* rp_power: usb-hub-reset gpio3 PB2 -> deasserted high at boot.
+ * GPIO3_D5 (line 29) is the NFC TX line. */
 &gpio3 {
+	gpio-line-names = "", "", "", "", "", "", "", "",
+			  "", "", "usb-hub-reset", "", "", "", "", "",
+			  "", "", "", "", "", "", "", "",
+			  "", "", "", "", "", "nfc-tx";
+
 	usb-hub-reset-hog {
 		gpio-hog;
 		gpios = <RK_PB2 GPIO_ACTIVE_HIGH>;
 		output-high;
 		line-name = "usb-hub-reset";
 	};
+};
+
+/* GPIO4_B2 (line 10) is the NFC RX line. */
+&gpio4 {
+	gpio-line-names = "", "", "", "", "", "", "", "",
+			  "", "", "nfc-rx";
 };
