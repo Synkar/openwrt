@@ -343,25 +343,29 @@
 		clock-frequency = <16000000>;
 	};
 
-	/* CAN1_SPI_RESET and CAN2_SPI_RESET are the MCP2515 RESET# pins.
-	 * Active-low: the chip stays in reset while the line is high, which
-	 * made mcp251x time out in "didn't enter in conf mode after reset".
-	 * mcp251x enables vdd on probe; that drives the pin low and waits
-	 * startup-delay-us for the 16 MHz oscillator. GPIO_ACTIVE_LOW is the
-	 * polarity. Omit enable-active-high: without it, gpiolib forces
-	 * regulator-fixed active-low unless the specifier already says so. */
+	/* CAN1_SPI_RESET and CAN2_SPI_RESET are the MCP2515 nRESET pins
+	 * (active low): expander IO4/IO5 here, each on its own module.
+	 * regulator-fixed asserts its GPIO on enable, so enable = pin high
+	 * = reset released requires GPIO_ACTIVE_HIGH + enable-active-high.
+	 * With the previous ACTIVE_LOW polarity, enabling vdd drove nRESET
+	 * low and held the chip in reset during probe ("didn't enter in
+	 * conf mode"). At registration the pin drives low, keeping both
+	 * chips in reset until mcp251x probes. startup-delay-us covers
+	 * oscillator start after the reset release. */
 	spican0_en: regulator-spican0-en {
 		compatible = "regulator-fixed";
 		regulator-name = "spican0-enable";
-		gpio = <&io_expander 4 GPIO_ACTIVE_LOW>;
-		startup-delay-us = <5000>;
+		gpio = <&io_expander 4 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <100000>;
 	};
 
 	spican1_en: regulator-spican1-en {
 		compatible = "regulator-fixed";
 		regulator-name = "spican1-enable";
-		gpio = <&io_expander 5 GPIO_ACTIVE_LOW>;
-		startup-delay-us = <5000>;
+		gpio = <&io_expander 5 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		startup-delay-us = <100000>;
 	};
 
 };
@@ -1251,16 +1255,17 @@
  *
  * GPIO3_D5 is spi0_cs1_m3 in the SoC pinctrl and is the NFC TX line,
  * so spi0m3_cs1 stays out of pinctrl. Native CS1 is not a substitute.
- * GPIO4_B2 is the NFC RX line. spican0 INT is GPIO3_C4 and spican1 INT
- * is GPIO3_C5. Both stay GPIO, open-drain, active-low, and are not muxed
- * as can2m0 or uart5m1. Each module has its own 16 MHz crystal, so
- * spican1 does not depend on spican0 CLKOUT.
+ * GPIO4_B2 is the NFC RX line. spican0 CS is GPIO3_C7 and spican1 CS is
+ * GPIO3_D4; spican0 INT is GPIO3_C4 and spican1 INT is GPIO3_C5. Both
+ * INTs stay GPIO, open-drain, active-low, and are not muxed as can2m0
+ * or uart5m1. Each module has its own 16 MHz crystal, so spican1 does
+ * not depend on spican0 CLKOUT.
  * can-link.sh brings spican1 up at 1 Mbit/s and spican0 at 500 kbit/s. */
 &spi0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi0m3_pins &spi0_cs_gpios &spican_int_pins>;
-	cs-gpios = <&gpio3 RK_PD4 GPIO_ACTIVE_LOW>,
-		   <&gpio3 RK_PC7 GPIO_ACTIVE_LOW>;
+	cs-gpios = <&gpio3 RK_PC7 GPIO_ACTIVE_LOW>,
+		   <&gpio3 RK_PD4 GPIO_ACTIVE_LOW>;
 	num-cs = <2>;
 	status = "okay";
 
