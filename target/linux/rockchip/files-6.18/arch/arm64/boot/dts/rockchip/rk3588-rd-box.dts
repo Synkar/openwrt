@@ -1258,7 +1258,9 @@
  * GPIO4_B2 is the NFC RX line. spican0 CS is GPIO3_C7 and spican1 CS is
  * GPIO3_D4; spican0 INT is GPIO3_C4 and spican1 INT is GPIO3_C5. Both
  * INTs stay GPIO, open-drain, active-low, and are not muxed as can2m0
- * or uart5m1. Each module has its own 16 MHz crystal, so spican1 does
+ * or uart5m1. int-gpios is the same pin as interrupts: mcp251x requests
+ * it in probe and holds it until remove, so a link down cannot free the
+ * line for sysfs. Each module has its own 16 MHz crystal, so spican1 does
  * not depend on spican0 CLKOUT.
  * can-link.sh brings spican1 up at 1 Mbit/s and spican0 at 500 kbit/s. */
 &spi0 {
@@ -1277,6 +1279,7 @@
 		vdd-supply = <&spican0_en>;
 		interrupt-parent = <&gpio3>;
 		interrupts = <RK_PC4 IRQ_TYPE_LEVEL_LOW>;
+		int-gpios = <&gpio3 RK_PC4 GPIO_ACTIVE_LOW>;
 	};
 
 	spican1: can@1 {
@@ -1287,6 +1290,7 @@
 		vdd-supply = <&spican1_en>;
 		interrupt-parent = <&gpio3>;
 		interrupts = <RK_PC5 IRQ_TYPE_LEVEL_LOW>;
+		int-gpios = <&gpio3 RK_PC5 GPIO_ACTIVE_LOW>;
 	};
 };
 

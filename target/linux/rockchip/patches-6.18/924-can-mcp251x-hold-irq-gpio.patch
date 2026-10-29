@@ -1,0 +1,51 @@
+Subject: can: mcp251x: hold the interrupt GPIO across link down
+
+mcp251x requests its IRQ in ndo_open and frees it in ndo_stop. On this
+kernel that path only marks the line IRQ and never gpio_request()s it,
+so between down and up the descriptor has no owner. Userspace can export
+the same pin, and the next up fails with -EBUSY.
+
+An optional int-gpios property reserves that line from probe until the
+device is removed. ndo_open still locks it as an IRQ; the request stays
+an input, so lock_as_irq keeps working. Boards without the property are
+unchanged.
+---
+ drivers/net/can/spi/mcp251x.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+--- a/drivers/net/can/spi/mcp251x.c
++++ b/drivers/net/can/spi/mcp251x.c
+@@ -28,5 +28,6 @@
+ #include <linux/ethtool.h>
+ #include <linux/freezer.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/gpio/driver.h>
+ #include <linux/interrupt.h>
+ #include <linux/io.h>
+@@ -1334,6 +1335,7 @@ static int mcp251x_can_probe(struct spi_device *spi)
+ 	struct net_device *net;
+ 	struct mcp251x_priv *priv;
+ 	struct clk *clk;
++	struct gpio_desc *irq_gpiod;
+ 	u32 freq;
+ 	int ret;
+ 
+@@ -1392,6 +1394,18 @@ static int mcp251x_can_probe(struct spi_device *spi)
+ 		goto out_clk;
+ 	}
+ 
++	/*
++	 * Keep the interrupt pin requested for the life of the device.
++	 * ndo_stop frees the IRQ, which otherwise leaves the GPIO free
++	 * for sysfs to claim before the next ndo_open.
++	 */
++	irq_gpiod = devm_gpiod_get_optional(&spi->dev, "int", GPIOD_IN);
++	if (IS_ERR(irq_gpiod)) {
++		ret = PTR_ERR(irq_gpiod);
++		dev_err(&spi->dev, "failed to reserve interrupt GPIO: %pe\n", irq_gpiod);
++		goto out_clk;
++	}
++
+ 	ret = mcp251x_power_enable(priv->power, 1);
+ 	if (ret)
+ 		goto out_clk;
