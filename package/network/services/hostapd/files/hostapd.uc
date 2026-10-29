@@ -240,8 +240,20 @@ function __iface_pending_next(pending, state, ret, data)
 		});
 		return "wpas_stopped";
 	case "wpas_stopped":
-		if (!iface_add(phy, config))
+		if (!iface_add(phy, config)) {
 			hostapd.printf(`hostapd.add_iface failed for phy ${phy} ifname=${bss.ifname}`);
+			pending.retry_count ??= 0;
+			if (++pending.retry_count <= 5) {
+				let t = uloop.timer(2000, () => {
+					delete pending.defer;
+					pending.next();
+				});
+				pending.defer = {
+					abort: () => t.cancel()
+				};
+				return "wpas_stopped";
+			}
+		}
 		pending.call("wpa_supplicant", "phy_set_state", {
 			phy: phydev.phy,
 			radio: phydev.radio ?? -1,
@@ -1450,10 +1462,8 @@ let main_obj = {
 			if (!iface)
 				return 0;
 
-			if (!req.args.up) {
-				iface.stop();
+			if (!req.args.up)
 				return 0;
-			}
 
 			let freq_info;
 			if (req.args.frequency) {
