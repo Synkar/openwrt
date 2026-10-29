@@ -1,0 +1,42 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] bcmdhd: silence FORTIFY field-spanning memcpy warnings
+
+CONFIG_FORTIFY_SOURCE (kernel 6.18) WARNs on three memcpys that write
+into trailing one-element/flexible-array fields; the writes stay within
+the real allocations. unsafe_memcpy() is the kernel API for this case
+(its 4th argument is a mandatory justification comment). No behavior
+change.
+
+--- a/wl_event.c
++++ b/wl_event.c
+@@ -179,7 +179,7 @@
+ 	e->etype = event;
+ 	memcpy(&e->emsg, msg, sizeof(wl_event_msg_t));
+ 	if (data)
+-		memcpy(e->edata, data, data_len);
++		unsafe_memcpy(e->edata, data, data_len, /* flex array */);
+ 	flags = wl_ext_event_lock_eq(event_params);
+ 	list_add_tail(&e->eq_list, &event_params->eq_list);
+ 	wl_ext_event_unlock_eq(event_params, flags);
+--- a/wl_cfg80211.c
++++ b/wl_cfg80211.c
+@@ -19035,7 +19035,7 @@
+ 	e->etype = event;
+ 	memcpy(&e->emsg, msg, sizeof(wl_event_msg_t));
+ 	if (data)
+-		memcpy(e->edata, data, data_len);
++		unsafe_memcpy(e->edata, data, data_len, /* flex array */);
+ 	e->datalen = data_len;
+ 	e->id = cfg->eidx.enqd++;
+ 	flags = wl_lock_eq(cfg);
+--- a/wl_cfgscan.c
++++ b/wl_cfgscan.c
+@@ -321,7 +321,7 @@
+ 		WL_ERR(("dst_size is not enough\n"));
+ 		return -ENOSPC;
+ 	}
+-	memcpy(dst, &ie->buf[0], ie->offset);
++	unsafe_memcpy(dst, &ie->buf[0], ie->offset, /* flex array */);
+ 
+ 	return err;
+ }
