@@ -33,6 +33,7 @@ define KernelPackage/bcmdhd
   TITLE:=Broadcom DHD vendor driver for AP6275P/BCM43752 (WiFi6/11ax)
   DEPENDS:=@TARGET_rockchip +kmod-cfg80211
   FILES:=$(PKG_BUILD_DIR)/bcmdhd.ko
+  AUTOLOAD:=$(call AutoProbe,bcmdhd)
   KCONFIG:=
 endef
 
@@ -41,8 +42,8 @@ define KernelPackage/bcmdhd/description
   kernel-6.1 SDK), ported to kernel 6.18 for the Ampak AP6275P (BCM43752)
   PCIe module. This is the only driver exposing 802.11ax (HE) on this
   module; mainline brcmfmac has no HE support at all.
-  No AUTOLOAD on purpose: it claims the same PCI ID (14e4:449d) as
-  brcmfmac, so enable exactly one of them. STA+AP concurrency supported
+  It claims the same PCI ID (14e4:449d) as brcmfmac: never install both
+  (rd-box ships bcmdhd only). STA+AP concurrency supported
   (op_mode=0x5). Requires the AP6275P vendor firmware (bcmdhd-firmware).
 endef
 
