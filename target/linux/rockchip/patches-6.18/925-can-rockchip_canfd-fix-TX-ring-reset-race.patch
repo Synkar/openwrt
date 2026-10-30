@@ -1,0 +1,248 @@
+From: Victor Terra Ferrao <victor.terra@synkar.com>
+Subject: can: rockchip_canfd: fix permanent TX wedge after bus-off/restart churn
+
+On the RD-BOX-RK3588 fleet we see can0 stop transmitting while RX keeps
+working, flooding the log with
+
+  rockchip_canfd fea50000.can can0: can_put_echo_skb: BUG! echo_skb 0 is occupied!
+
+at the application frame rate until the module is reloaded
+(ifdown/ifup does not help). The persistent log shows the corruption
+happening live, always inside bus-off restart storms (restart-ms=100):
+
+  [44.63] bus-off, scheduling restart in 100 ms
+  [44.72] TX watchdog: flushed stuck echo slot 1 (tx_head=0xb tx_tail=0xa)
+  [44.83] bus-off, scheduling restart in 100 ms
+  [44.93] TX watchdog: flushed stuck echo slot 0 (tx_head=0xc tx_tail=0xb)
+  [45.43] bus-off, scheduling restart in 100 ms
+  [45.53] TX watchdog: flushed stuck echo slot 0 (tx_head=0x24 tx_tail=0x23)
+  [45.53] rkcanfd_tx_tail_is_eff: echo_skb[1]=NULL tx_head=0x24 tx_tail=0x23
+  ... 317k lines of "echo_skb 0 is occupied" for the next 90 minutes
+
+Root cause: rkcanfd_chip_fifo_setup() resets tx_head/tx_tail without
+holding tx_lock, and rkcanfd_start_xmit() installs its echo skb outside
+tx_lock (922). During a restart storm the unlocked counter reset
+interleaves with in-flight xmit installs, TX_FINISH completions and
+watchdog flushes, desynchronizing the counters from echo_skb[]. Two
+states result, and both are invisible to every recovery path because
+they all iterate over tx_pending only:
+
+  - orphan slot: echo_skb[N] occupied with tx_pending == 0 - blocks
+    can_put_echo_skb() forever, queue never stops, all TX dropped
+  - pending slot with NULL echo_skb - never completes, blocks the
+    watchdog flush when TX_REQ stays latched
+
+Fix in four layers:
+
+  - rkcanfd_chip_fifo_setup(): reset tx_head/tx_tail under tx_lock and
+    drain the whole echo ring unconditionally (not only pending
+    slots). Every chip restart now lands on a fully consistent ring.
+  - rkcanfd_tx_cleanup(): free all slots and force tx_tail == tx_head,
+    so a stop can never leave half-state behind.
+  - rkcanfd_start_xmit(): revalidate after taking tx_lock. A tx_gen
+    counter (bumped under tx_lock on every ring reset) tells the xmit
+    path whether the chip was stopped/restarted while it was
+    installing the echo skb; in that case undo the install and drop
+    the frame instead of programming a dead FIFO.
+  - TX watchdog: sweep for occupied echo slots outside the
+    [tx_tail, tx_head) window (orphans) and free them, with a
+    "freed orphaned echo slot" log line. Safety net that heals any
+    residual wedge within one 50 ms tick.
+
+Validated by log forensics on 10.0.3.27 (Oct 29 20:08 and Oct 30
+18:04 incidents) and by the canstress churn loop (ifdown/ifup churn +
+cangen saturation on ID 0x008).
+
+Signed-off-by: Victor Terra Ferrao <victor.terra@synkar.com>
+---
+ drivers/net/can/rockchip/rockchip_canfd-core.c |   38 +++++++++-
+ drivers/net/can/rockchip/rockchip_canfd-tx.c   |   95 +++++++++++++++++++++---
+ drivers/net/can/rockchip/rockchip_canfd.h      |    5 +
+ 3 files changed, 125 insertions(+), 13 deletions(-)
+
+diff -urN a/drivers/net/can/rockchip/rockchip_canfd-core.c b/drivers/net/can/rockchip/rockchip_canfd-core.c
+--- a/drivers/net/can/rockchip/rockchip_canfd-core.c	2026-10-30 17:01:54.344052536 -0300
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c	2026-10-30 17:01:54.344052536 -0300
+@@ -234,15 +234,40 @@
+ 
+ static void rkcanfd_chip_fifo_setup(struct rkcanfd_priv *priv)
+ {
++	struct net_device_stats *stats = &priv->ndev->stats;
++	unsigned int frame_len = 0;
++	unsigned long flags;
+ 	u32 reg;
++	int i;
+ 
+ 	/* RX FIFO */
+ 	reg = rkcanfd_read(priv, RKCANFD_REG_RX_FIFO_CTRL);
+ 	reg |= RKCANFD_REG_RX_FIFO_CTRL_RX_FIFO_ENABLE;
+ 	rkcanfd_write(priv, RKCANFD_REG_RX_FIFO_CTRL, reg);
+ 
++	/* Reset the TX ring under tx_lock and drain the whole echo
++	 * ring unconditionally. During bus-off/restart churn the
++	 * counters can drift from echo_skb[] (an in-flight
++	 * start_xmit() or watchdog flush races the reset), leaving
++	 * occupied slots that are not covered by tx_pending. Those
++	 * orphans are invisible to every completion path and
++	 * permanently wedge TX with
++	 * "can_put_echo_skb: BUG! echo_skb N is occupied!".
++	 * The tx_gen bump invalidates concurrent start_xmit()
++	 * installs, which revalidate after taking tx_lock.
++	 */
++	raw_spin_lock_irqsave(&priv->tx_lock, flags);
++	for (i = 0; i < RKCANFD_TXFIFO_DEPTH; i++) {
++		if (priv->can.echo_skb[i]) {
++			can_free_echo_skb(priv->ndev, i, &frame_len);
++			stats->tx_dropped++;
++		}
++	}
+ 	WRITE_ONCE(priv->tx_head, 0);
+ 	WRITE_ONCE(priv->tx_tail, 0);
++	WRITE_ONCE(priv->tx_gen, priv->tx_gen + 1);
++	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
++
+ 	netdev_reset_queue(priv->ndev);
+ }
+ 
+diff -urN a/drivers/net/can/rockchip/rockchip_canfd-tx.c b/drivers/net/can/rockchip/rockchip_canfd-tx.c
+--- a/drivers/net/can/rockchip/rockchip_canfd-tx.c	2026-10-30 17:01:54.344052536 -0300
++++ b/drivers/net/can/rockchip/rockchip_canfd-tx.c	2026-10-30 17:01:54.344052536 -0300
+@@ -196,6 +196,45 @@
+ 		}
+ 	}
+ 
++	/* Heal orphaned echo slots: an occupied slot outside the
++	 * range covered by [tx_tail, tx_head) is invisible to every
++	 * completion path and blocks that slot forever
++	 * ("can_put_echo_skb: BUG! echo_skb N is occupied!").
++	 * Creation of orphans is prevented by the chip_fifo_setup()
++	 * reset lock and the start_xmit() revalidation; this sweep
++	 * is the safety net that heals any residual state within
++	 * one watchdog tick.
++	 */
++	{
++		unsigned int tx_tail = rkcanfd_get_tx_tail(priv);
++		unsigned int tx_pending = rkcanfd_get_tx_pending(priv);
++		unsigned int i;
++
++		if (tx_pending > RKCANFD_TXFIFO_DEPTH)
++			tx_pending = RKCANFD_TXFIFO_DEPTH;
++
++		for (i = 0; i < RKCANFD_TXFIFO_DEPTH; i++) {
++			unsigned int off, frame_len = 0;
++
++			/* distance from tx_tail within the ring */
++			off = (i - tx_tail) & (RKCANFD_TXFIFO_DEPTH - 1);
++			if (off < tx_pending)
++				continue;	/* live slot */
++
++			if (!priv->can.echo_skb[i])
++				continue;
++
++			can_free_echo_skb(priv->ndev, i, &frame_len);
++			stats->tx_dropped++;
++			flushed_pkts++;
++			flushed_bytes += frame_len;
++
++			netdev_info(priv->ndev,
++				    "TX watchdog: freed orphaned echo slot %u (tx_head=0x%08x tx_tail=0x%08x)\n",
++				    i, priv->tx_head, priv->tx_tail);
++		}
++	}
++
+ 	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
+ 
+ 	if (flushed_pkts)
+@@ -210,17 +249,26 @@
+ 	struct net_device_stats *stats = &priv->ndev->stats;
+ 	unsigned int cleaned = 0, frame_len = 0;
+ 	unsigned long flags;
++	int i;
+ 
+ 	raw_spin_lock_irqsave(&priv->tx_lock, flags);
+ 
+-	while (rkcanfd_get_tx_pending(priv)) {
+-		const unsigned int tx_tail = rkcanfd_get_tx_tail(priv);
+-
+-		can_free_echo_skb(priv->ndev, tx_tail, &frame_len);
+-		WRITE_ONCE(priv->tx_tail, priv->tx_tail + 1);
+-		cleaned++;
++	/* Free the whole ring, not just tx_pending slots: after a
++	 * reset race the counters under-report the occupied slots.
++	 */
++	for (i = 0; i < RKCANFD_TXFIFO_DEPTH; i++) {
++		if (priv->can.echo_skb[i]) {
++			can_free_echo_skb(priv->ndev, i, &frame_len);
++			cleaned++;
++		}
+ 	}
++
++	/* The ring is empty now: force the tail consistent even if a
++	 * start_xmit() advanced the head past a completed stop.
++	 */
++	WRITE_ONCE(priv->tx_tail, READ_ONCE(priv->tx_head));
+ 	WRITE_ONCE(priv->tx_desync, false);
++	WRITE_ONCE(priv->tx_gen, priv->tx_gen + 1);
+ 
+ 	raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
+ 
+@@ -280,7 +328,7 @@
+ {
+ 	struct rkcanfd_priv *priv = netdev_priv(ndev);
+ 	u32 reg_frameinfo, reg_id, reg_cmd;
+-	unsigned int tx_head, frame_len;
++	unsigned int tx_head, tx_gen, frame_len;
+ 	const struct canfd_frame *cfd;
+ 	unsigned long flags;
+ 	int err;
+@@ -305,6 +353,7 @@
+ 	}
+ 
+ 	tx_head = rkcanfd_get_tx_head(priv);
++	tx_gen = READ_ONCE(priv->tx_gen);
+ 	frame_len = can_skb_get_frame_len(skb);
+ 	err = can_put_echo_skb(skb, ndev, tx_head, frame_len);
+ 	if (err) {
+@@ -314,6 +363,26 @@
+ 
+ 	raw_spin_lock_irqsave(&priv->tx_lock, flags);
+ 
++	/* The echo skb is installed outside of tx_lock (to keep
++	 * allocations out of the atomic section on PREEMPT_RT).
++	 * The chip may have been stopped and restarted (bus-off
++	 * recovery, ifdown, freeze bounce) in the meantime: the TX
++	 * ring was flushed and reset by rkcanfd_chip_fifo_setup(),
++	 * and the watchdog orphan sweep may have freed this slot.
++	 * Undo the install instead of programming a dead FIFO or
++	 * resurrecting an orphaned slot.
++	 */
++	if (READ_ONCE(priv->tx_gen) != tx_gen ||
++	    !priv->can.echo_skb[tx_head]) {
++		unsigned int fl = 0;
++
++		if (priv->can.echo_skb[tx_head])
++			can_free_echo_skb(ndev, tx_head, &fl);
++		raw_spin_unlock_irqrestore(&priv->tx_lock, flags);
++		ndev->stats.tx_dropped++;
++		return NETDEV_TX_OK;
++	}
++
+ 	skb = priv->can.echo_skb[tx_head];
+ 	cfd = (const struct canfd_frame *)skb->data;
+ 
+diff -urN a/drivers/net/can/rockchip/rockchip_canfd.h b/drivers/net/can/rockchip/rockchip_canfd.h
+--- a/drivers/net/can/rockchip/rockchip_canfd.h	2026-10-30 17:01:54.344052536 -0300
++++ b/drivers/net/can/rockchip/rockchip_canfd.h	2026-10-30 17:01:54.344052536 -0300
+@@ -487,6 +487,12 @@
+ 	unsigned int tx_freeze_ticks;
+ 	bool tx_need_reset;
+ 
++	/* bumped under tx_lock on every TX ring reset (chip stop /
++	 * restart), so an in-flight start_xmit() can detect that its
++	 * installed echo skb belongs to a ring that no longer exists
++	 */
++	unsigned int tx_gen;
++
+ 	u32 reg_mode_default;
+ 	u32 reg_int_mask_default;
+ 	struct rkcanfd_devtype_data devtype_data;
