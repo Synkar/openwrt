@@ -143,6 +143,60 @@ function iface_freq_info(iface, config, params)
 	return hostapd.freq_info(freq, sec_offset, width);
 }
 
+/*
+ * AP+STA on one radio: the AP is created with start_disabled and only starts
+ * when the STA associates, on the STA channel. Starting both at once breaks
+ * bcmdhd bring-up, so that order is kept. But if the STA finds no network,
+ * the AP would never start. After AP_FALLBACK_DELAY without STA link, start
+ * the AP on its configured channel; it follows the STA once it associates.
+ * hostapd.data.ap_started[phy] tracks whether the AP was started, since the
+ * iface reports ENABLED even while start_disabled keeps it silent.
+ */
+const AP_FALLBACK_DELAY = 15000;
+
+function ap_fallback_cancel(phy)
+{
+	let timers = hostapd.data.ap_fallback_timer;
+	if (timers && timers[phy]) {
+		timers[phy].cancel();
+		delete timers[phy];
+	}
+}
+
+function ap_fallback_arm(phy)
+{
+	hostapd.data.ap_started ??= {};
+	hostapd.data.ap_fallback_timer ??= {};
+	if (hostapd.data.ap_started[phy] || hostapd.data.ap_fallback_timer[phy])
+		return;
+
+	hostapd.data.ap_fallback_timer[phy] = uloop.timer(AP_FALLBACK_DELAY, () => {
+		delete hostapd.data.ap_fallback_timer[phy];
+		if (hostapd.data.ap_started[phy])
+			return;
+
+		/* AP iface not created yet (e.g. bring-up retry): check again later */
+		let iface = hostapd.interfaces[phy];
+		if (!iface) {
+			ap_fallback_arm(phy);
+			return;
+		}
+
+		hostapd.printf(`No STA link on phy ${phy}, starting AP without it`);
+		if (iface.start())
+			hostapd.data.ap_started[phy] = true;
+	});
+}
+
+function ap_mark_started(phy, started)
+{
+	hostapd.data.ap_started ??= {};
+	if (started)
+		hostapd.data.ap_started[phy] = true;
+	else
+		delete hostapd.data.ap_started[phy];
+}
+
 function iface_add(phy, config, phy_status)
 {
 	let config_inline = iface_gen_config(config, !!phy_status);
@@ -161,7 +215,11 @@ function iface_add(phy, config, phy_status)
 
 	let freq_info = iface_freq_info(iface, config, phy_status);
 
-	return iface.start(freq_info) >= 0;
+	let started = iface.start(freq_info) >= 0;
+	if (started)
+		ap_mark_started(phy, true);
+
+	return started;
 }
 
 function iface_config_macaddr_list(config)
@@ -348,6 +406,8 @@ function iface_restart(phydev, config, old_config)
 	let pending = hostapd.data.pending_config[phy];
 
 	csa_timer_cancel(phy);
+	ap_fallback_cancel(phy);
+	ap_mark_started(phy, false);
 
 	if (pending)
 		pending.abort();
@@ -1458,11 +1518,20 @@ let main_obj = {
 			if (!config || !config.bss || !config.bss[0] || !config.bss[0].ifname)
 				return 0;
 
+			/*
+			 * STA lost link: keep a running AP up, start a waiting one
+			 * later. Armed even before the AP iface exists, since the STA
+			 * may report its state while the AP is still being created.
+			 */
+			if (!req.args.up) {
+				ap_fallback_arm(phy);
+				return 0;
+			}
+
+			ap_fallback_cancel(phy);
+
 			let iface = hostapd.interfaces[phy];
 			if (!iface)
-				return 0;
-
-			if (!req.args.up)
 				return 0;
 
 			let freq_info;
@@ -1476,6 +1545,7 @@ let main_obj = {
 					let ret = iface.switch_channel(freq_info);
 					if (!ret)
 						return libubus.STATUS_UNKNOWN_ERROR;
+					ap_mark_started(phy, true);
 					return 0;
 				}
 			}
@@ -1484,6 +1554,7 @@ let main_obj = {
 			if (!ret)
 				return libubus.STATUS_UNKNOWN_ERROR;
 
+			ap_mark_started(phy, true);
 			return 0;
 		}
 	},

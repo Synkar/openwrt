@@ -108,6 +108,69 @@ function update_config(new_devices, mlo_vifs)
 	}
 }
 
+/*
+ * A radio runs at most one STA and one AP: bcmdhd (AP6275P) exposes only two
+ * netdevs, and a second STA takes over the AP netdev. When more than one STA
+ * (or AP) is enabled on the same radio, keep the iface that was just enabled
+ * (not running before this reload) and disable the others in UCI, so the
+ * config shown in LuCI matches what runs. With no fresh iface (e.g. both
+ * enabled at boot), keep the last one in config order.
+ */
+function enforce_one_vif_per_mode(uci, ifaces)
+{
+	let running = {};
+	for (let dev_name, dev in wireless.devices)
+		for (let vif in dev.data?.vif ?? [])
+			running[vif.name] = true;
+
+	let groups = {};
+	for (let name, data in ifaces) {
+		let mode = data.mode ?? "ap";
+		if (mode != "sta" && mode != "ap")
+			continue;
+
+		for (let dev_name in parse_array(data.device)) {
+			let key = `${dev_name}/${mode}`;
+			groups[key] ??= [];
+			push(groups[key], name);
+		}
+	}
+
+	let changed = false;
+	for (let key, names in groups) {
+		if (length(names) < 2)
+			continue;
+
+		let fresh = filter(names, (n) => !running[n]);
+		let keep = length(fresh) ? fresh[length(fresh) - 1] : names[length(names) - 1];
+		for (let name in names) {
+			if (name == keep || !ifaces[name])
+				continue;
+
+			netifd.log(netifd.L_NOTICE ?? netifd.L_WARNING,
+				`wireless: only one ${key} iface allowed, disabling '${name}', keeping '${keep}'\n`);
+			uci.set("wireless", name, "disabled", "1");
+			delete ifaces[name];
+			changed = true;
+		}
+	}
+
+	if (!changed)
+		return;
+
+	uci.commit("wireless");
+
+	/*
+	 * reload_config keeps an md5 of each `uci show <config>` and only
+	 * reloads what changed since its last run. Record the config written
+	 * here, or enabling the iface just disabled would look unchanged.
+	 */
+	system('f=/var/run/config.md5; e=/var/run/config.check/wireless; ' +
+		'[ -f $f ] || exit 0; ' +
+		's=$(uci show wireless 2>/dev/null | md5sum | cut -d" " -f1); ' +
+		'sed -i "s#^[0-9a-f]*  $e\\$#$s  $e#" $f');
+}
+
 function config_init(uci)
 {
 	let config = uci.get_all("wireless");
@@ -138,6 +201,8 @@ function config_init(uci)
 		if (list)
 			list[name] = data;
 	}
+
+	enforce_one_vif_per_mode(uci, sections.iface);
 
 	for (let name, data in sections.device) {
 		if (!data.type)

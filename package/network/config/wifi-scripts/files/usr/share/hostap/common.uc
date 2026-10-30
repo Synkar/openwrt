@@ -40,16 +40,28 @@ const mesh_params = {
 	mesh_nolearn: "nolearn"
 };
 
-function wdev_remove(name)
-{
-	nl80211.request(nl80211.const.NL80211_CMD_DEL_INTERFACE, 0, { dev: name });
-}
-
 function __phy_is_fullmac(phyidx)
 {
 	let data = nl80211.request(nl80211.const.NL80211_CMD_GET_WIPHY, 0, { wiphy: phyidx });
 
 	return !data.software_iftypes.monitor;
+}
+
+function wdev_remove(name)
+{
+	/*
+	 * fullmac drivers can't really delete their interfaces: bcmdhd treats
+	 * deleting its primary netdev as a firmware hang and resets the chip,
+	 * taking every other interface (the AP too) down with it. Just bring
+	 * the interface down; wdev_create reuses down interfaces on fullmac.
+	 */
+	let phyidx = readfile(`/sys/class/net/${name}/phy80211/index`);
+	if (phyidx != null && __phy_is_fullmac(int(trim(phyidx)))) {
+		rtnl.request(rtnl.const.RTM_SETLINK, 0, { dev: name, change: 1, flags: 0 });
+		return;
+	}
+
+	nl80211.request(nl80211.const.NL80211_CMD_DEL_INTERFACE, 0, { dev: name });
 }
 
 function phy_is_fullmac(phy)
@@ -59,7 +71,7 @@ function phy_is_fullmac(phy)
 	return __phy_is_fullmac(phyidx);
 }
 
-function find_reusable_wdev(phyidx)
+function find_reusable_wdev(phyidx, name)
 {
 	if (!__phy_is_fullmac(phyidx))
 		return null;
@@ -68,10 +80,14 @@ function find_reusable_wdev(phyidx)
 		nl80211.const.NL80211_CMD_GET_INTERFACE,
 		nl80211.const.NLM_F_DUMP,
 		{ wiphy: phyidx });
-	for (let res in data)
-		if (trim(readfile(`/sys/class/net/${res.ifname}/operstate`)) == "down")
-			return res.ifname;
-	return null;
+
+	/* wdev_remove keeps fullmac interfaces, so prefer the one already named */
+	let down = filter(data ?? [], (res) =>
+		trim(readfile(`/sys/class/net/${res.ifname}/operstate`)) == "down");
+	for (let res in down)
+		if (res.ifname == name)
+			return name;
+	return length(down) ? down[0].ifname : null;
 }
 
 function wdev_set_radio_mask(name, mask)
@@ -108,7 +124,7 @@ function wdev_create(phy, name, data)
 
 	nl80211.error();
 
-	let reuse_ifname = find_reusable_wdev(phyidx);
+	let reuse_ifname = find_reusable_wdev(phyidx, name);
 	if (reuse_ifname &&
 	    (reuse_ifname == name ||
 	     rtnl.request(rtnl.const.RTM_SETLINK, 0, { dev: reuse_ifname, ifname: name}) != false)) {

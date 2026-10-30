@@ -63,6 +63,7 @@ endef
 define Build/Compile
 	$(KERNEL_MAKE) M="$(PKG_BUILD_DIR)" modules \
 		CONFIG_BCMDHD=m CONFIG_BCMDHD_PCIE=y CONFIG_CFG80211=m CONFIG_BCMDHD_OOB= \
+		CONFIG_BCMDHD_NO_POWER_OFF=y \
 		KBUILD_MODPOST_WARN=1 \
 		LINUXINCLUDE="$(BCMDHD_BACKPORTS_INCLUDE) -I$(LINUX_DIR)/arch/$(LINUX_KARCH)/include -I$(LINUX_DIR)/arch/$(LINUX_KARCH)/include/generated -I$(LINUX_DIR)/include -I$(LINUX_DIR)/arch/$(LINUX_KARCH)/include/uapi -I$(LINUX_DIR)/arch/$(LINUX_KARCH)/include/generated/uapi -I$(LINUX_DIR)/include/uapi -I$(LINUX_DIR)/include/generated/uapi -include $(LINUX_DIR)/include/linux/compiler-version.h -include $(LINUX_DIR)/include/linux/kconfig.h"
 endef

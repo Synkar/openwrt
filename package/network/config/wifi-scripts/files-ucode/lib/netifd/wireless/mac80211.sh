@@ -255,6 +255,7 @@ function setup() {
 				break;
 			// fallthrough
 		case 'sta':
+			data.ap_start_disabled = true;
 			data.channel_follow = true;
 			let config = supplicant.generate(supplicant_data, data, v);
 			if (mode == "mesh")
