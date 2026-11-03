@@ -1,0 +1,46 @@
+From 9c7f6b56e61cfe5257287802374b75607722933d Mon Sep 17 00:00:00 2001
+From: Lucas Simoes <lucassimoe@gmail.com>
+Date: Fri, 30 Oct 2026 23:10:04 -0300
+Subject: [PATCH] can: rockchip_canfd: stop the TX queue on bus-off
+
+On bus-off the driver stops the chip and calls can_bus_off(), but
+leaves the TX queue running. can_restart() then flushes the echo skbs
+"because the device is bus-off and no messages can come in or go out",
+and rkcanfd_set_mode() restarts the chip, which resets tx_head and
+tx_tail. A frame queued between the flush and the reset gets an echo
+slot that is outside the new [tx_tail, tx_head) window. Nothing frees
+it again, so every later frame that maps to that slot is dropped and
+TX is dead until the module is reloaded:
+
+  rockchip_canfd fea50000.can can0: can_put_echo_skb: BUG! echo_skb 1 is occupied!
+
+This is likely the "TX starvation after repeated Bus-Off" issue listed
+in rockchip_canfd.h. On an RK3588 robot whose bus goes bus-off about
+once a second it shows up within minutes to hours.
+
+Stop the queue before stopping the chip. rkcanfd_set_mode() already
+wakes it after the restart.
+
+---
+ drivers/net/can/rockchip/rockchip_canfd-core.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-core.c b/drivers/net/can/rockchip/rockchip_canfd-core.c
+index 938cd5a..cbfc11c 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-core.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c
+@@ -595,6 +595,11 @@ static int rkcanfd_handle_state_error_int(struct rkcanfd_priv *priv)
+ 	can_change_state(ndev, cf, tx_state, rx_state);
+ 
+ 	if (new_state == CAN_STATE_BUS_OFF) {
++		/* can_restart() flushes the echo skbs assuming nothing is
++		 * sent while bus-off. Keep the queue stopped until
++		 * rkcanfd_set_mode() has restarted the chip.
++		 */
++		netif_stop_queue(ndev);
+ 		rkcanfd_chip_stop(priv, CAN_STATE_BUS_OFF);
+ 		can_bus_off(ndev);
+ 	}
+-- 
+2.43.0
+

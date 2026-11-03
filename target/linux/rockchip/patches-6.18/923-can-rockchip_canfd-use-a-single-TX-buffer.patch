@@ -1,0 +1,42 @@
+From 9789085ea5033e2c67af2e6cd19d3960060dccc4 Mon Sep 17 00:00:00 2001
+From: Lucas Simoes <lucassimoe@gmail.com>
+Date: Fri, 30 Oct 2026 23:49:29 -0300
+Subject: [PATCH] can: rockchip_canfd: use a single TX buffer
+
+TX completion matches each self-received frame (RXSTX) against the
+oldest pending slot, echo_skb[tx_tail], so it relies on the controller
+sending the two TX buffers in request order. The RK3588 does not keep
+that order: after a transmit error it can send the newer buffer first,
+even when both frames have the same CAN ID. The echo of the newer frame
+then does not match tx_tail and is delivered as a received frame, the
+older slot never completes and the TX queue stalls until the netdev
+watchdog fires:
+
+  rockchip_canfd fea50000.can can0: TX timeout (tx_head=0x00000041
+  tx_tail=0x0000003f state=0x00000010 cmd=0x00000000 int=0x00000000)
+
+On a bus with frequent transmit errors this happened every few seconds
+with a 100 Hz + 20 Hz command load. Setting TXORDER_MODE does not help
+(no echo matches at all). Rockchip's BSP uses tx-fifo-depth = <1> on
+RK3588; do the same. One frame takes about 0.5 ms at 250 kbit/s, so a
+single buffer still sustains far more than the bus can carry.
+---
+ drivers/net/can/rockchip/rockchip_canfd.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/can/rockchip/rockchip_canfd.h b/drivers/net/can/rockchip/rockchip_canfd.h
+index 3b0d806..9bb0e99 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd.h
++++ b/drivers/net/can/rockchip/rockchip_canfd.h
+@@ -290,7 +290,7 @@
+ 
+ #define DEVICE_NAME "rockchip_canfd"
+ #define RKCANFD_NAPI_WEIGHT 32
+-#define RKCANFD_TXFIFO_DEPTH 2
++#define RKCANFD_TXFIFO_DEPTH 1
+ #define RKCANFD_TX_STOP_THRESHOLD 1
+ #define RKCANFD_TX_START_THRESHOLD 1
+ #define RKCANFD_TX_TIMEOUT_MS 1000
+-- 
+2.43.0
+

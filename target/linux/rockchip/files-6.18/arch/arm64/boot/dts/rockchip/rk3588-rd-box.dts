@@ -23,7 +23,7 @@
  *   - real WAN bring-up of synkar-netrole (DHCP uplink + masquerade)
  *   - HDMI audio (hdmi0_sound: deferred probe of asoc-simple-card)
  *
- * Done: CAN0 (rockchip_canfd bind + can0 UP at 500 kbps; see the can0 node).
+ * Done: CAN0 (rockchip_canfd, 250 kbit/s; see &can0).
  */
 
 /dts-v1/;
@@ -286,56 +286,6 @@
 		vin-supply = <&vcc_3v3_s3>;
 	};
 
-	/*
-	 * CAN0/CAN1: the rk3588 CAN IP matches rk3568v2. The can0/can1 nodes
-	 * do NOT exist in mainline rk3588-base.dtsi (only the can0m0/can1m0
-	 * pinctrl exists in rk3588-base-pinctrl.dtsi), so the full nodes are
-	 * defined here. Driver: rockchip_canfd (CONFIG_CAN_ROCKCHIP_CANFD) ->
-	 * compatible "rockchip,rk3568v2-canfd" (mainline has no rk3588
-	 * compatible; the vendor used out-of-tree "rockchip,can-2.0" on BSP 6.1).
-	 *
-	 * interrupts: mainline rk3588 GICv3 is 4-cell (#interrupt-cells = <4>
-	 * in rk3588-base.dtsi), inherited from the root. The 4th cell is the
-	 * partition/PPI mask (0 for SPI). Do not use the vendor 3-cell GIC
-	 * form, or the DT parser fails and platform_get_irq() returns -ENXIO
-	 * ("IRQ index 0 not found") — historical CAN0 bring-up bug.
-	 *
-	 * CAN1 stays DISABLED: can1m0 (gpio3 RK_PB5 = can1_rx_m0) is the SAME
-	 * pin as gmac1_txen (eth0 RGMII), required for the primary Ethernet.
-	 * The vendor does not enable can1 on this board either. A second CAN
-	 * on the hardware would need the can1m1 mux plus a schematic check.
-	 */
-	can0: can@fea50000 {
-		compatible = "rockchip,rk3568v2-canfd";
-		reg = <0x0 0xfea50000 0x0 0x1000>;
-		interrupts = <GIC_SPI 341 IRQ_TYPE_LEVEL_HIGH 0>;
-		clocks = <&cru CLK_CAN0>, <&cru PCLK_CAN0>;
-		clock-names = "baudclk", "apb_pclk";
-		resets = <&cru SRST_CAN0>, <&cru SRST_P_CAN0>;
-		reset-names = "can", "can-apb";
-		assigned-clocks = <&cru CLK_CAN0>;
-		assigned-clock-rates = <300000000>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&can0m0_pins>;
-		status = "okay";
-	};
-
-	can1: can@fea60000 {
-		compatible = "rockchip,rk3568v2-canfd";
-		reg = <0x0 0xfea60000 0x0 0x1000>;
-		interrupts = <GIC_SPI 342 IRQ_TYPE_LEVEL_HIGH 0>;
-		clocks = <&cru CLK_CAN1>, <&cru PCLK_CAN1>;
-		clock-names = "baudclk", "apb_pclk";
-		resets = <&cru SRST_CAN1>, <&cru SRST_P_CAN1>;
-		reset-names = "can", "can-apb";
-		assigned-clocks = <&cru CLK_CAN1>;
-		assigned-clock-rates = <200000000>;
-		pinctrl-names = "default";
-		pinctrl-0 = <&can1m0_pins>;
-		/* can1m0 conflicts with gmac1_txen (gpio3 RK_PB5); see the comment above. */
-		status = "disabled";
-	};
-
 	/* One 16 MHz crystal per MCP2515. Both nodes use this rate for bit timing. */
 	spican_osc: spican_osc {
 		compatible = "fixed-clock";
@@ -368,6 +318,17 @@
 		startup-delay-us = <100000>;
 	};
 
+};
+
+/* Native CAN, 250 kbit/s (drive bus: motor controllers, PMU). The node
+ * comes from rk3588-base.dtsi (rockchip,rk3588-canfd). At 300 MHz
+ * erratum 5 (bogus RX FIFO count) is rare; lower clocks make it common.
+ * can1 stays disabled: can1m0_pins (gpio3 RK_PB5) is gmac1_txen.
+ */
+&can0 {
+	assigned-clocks = <&cru CLK_CAN0>;
+	assigned-clock-rates = <300000000>;
+	status = "okay";
 };
 
 &cpu_b0 {

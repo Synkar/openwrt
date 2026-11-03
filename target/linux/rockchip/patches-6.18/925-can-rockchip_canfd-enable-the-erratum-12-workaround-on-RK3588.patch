@@ -1,0 +1,33 @@
+From d8393ac0ce5ef94983f448cf201376b329210f67 Mon Sep 17 00:00:00 2001
+From: Lucas Simoes <lucassimoe@gmail.com>
+Date: Fri, 30 Oct 2026 23:49:30 -0300
+Subject: [PATCH] can: rockchip_canfd: enable the erratum 12 workaround on
+ RK3588
+
+Rockchip's BSP driver sets SPACE_RX_MODE around every TX request on
+RK3588 as well, the same sequence the erratum 12 workaround writes. With
+it, transmissions that the controller finishes without a self-received
+frame (TX request cleared, no RXSTX echo, queue stuck until the TX
+timeout) went from 9 to 4 per minute under a 100 Hz command load on a
+bus with frequent transmit errors.
+---
+ drivers/net/can/rockchip/rockchip_canfd-core.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/can/rockchip/rockchip_canfd-core.c b/drivers/net/can/rockchip/rockchip_canfd-core.c
+index 5d20d95..24b7758 100644
+--- a/drivers/net/can/rockchip/rockchip_canfd-core.c
++++ b/drivers/net/can/rockchip/rockchip_canfd-core.c
+@@ -53,7 +53,8 @@ static const struct rkcanfd_devtype_data rkcanfd_devtype_data_rk3568v3 = {
+ static const struct rkcanfd_devtype_data rkcanfd_devtype_data_rk3588 = {
+ 	.model = RKCANFD_MODEL_RK3588,
+ 	.quirks = RKCANFD_QUIRK_RK3568_ERRATUM_5 |
+-		RKCANFD_QUIRK_RK3568_ERRATUM_6,
++		RKCANFD_QUIRK_RK3568_ERRATUM_6 |
++		RKCANFD_QUIRK_RK3568_ERRATUM_12,
+ };
+ 
+ static const char *__rkcanfd_get_model_str(enum rkcanfd_model model)
+-- 
+2.43.0
+
