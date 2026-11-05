@@ -1,0 +1,64 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] dmaengine: pl330: protect desc_pool with pool_lock on every access
+
+pl330_terminate_all(), the non-cyclic FREE path of pl330_tasklet() and
+pl330_free_chan_resources() move descriptors back into the DMAC-wide
+desc_pool while holding only the channel lock (or pl330->lock), whereas
+pluck_desc(), __pl330_giveback_desc() and the pl330_prep_dma_cyclic()
+error path take pool_lock. Two channels of the same DMAC can therefore
+manipulate the pool list concurrently.
+
+On a PREEMPT_RT kernel (tasklets and IRQ handlers run as threads) this
+race was hit on an RK3588 where channel 2 (I2S TX, cyclic, restarted on
+every XRUN by an LED driver) and channel 11 (UART RX via
+serial8250_rx_dma, prep + terminate on every interrupt) share
+fea10000.dma-controller. Once the pool's list head got corrupted it
+looked empty forever: pl330_get_desc() then kcalloc'd a fresh descriptor
+for every transfer (add_desc, pl330.c:2556) and every terminate spliced
+the used descriptors into an unreachable chain. /proc/allocinfo showed
+drivers/dma/pl330.c:2556 growing at 2.2 MB/s (256 descriptors of 256 B
+per cyclic start plus one per UART transfer) until the machine OOMed.
+
+Take pool_lock around the three unprotected list operations. pool_lock
+is always taken inside pch->lock / pl330->lock and never the other way
+around, so no ordering problem is introduced.
+
+Signed-off-by: Synkar <dev@synkar.com>
+---
+--- a/drivers/dma/pl330.c	2026-11-05 14:08:30.340693553 -0300
++++ b/drivers/dma/pl330.c	2026-11-05 14:08:30.430945964 -0300
+@@ -2119,7 +2119,9 @@
+ 			}
+ 		} else {
+ 			desc->status = FREE;
++			spin_lock(&pch->dmac->pool_lock);
+ 			list_move_tail(&desc->node, &pch->dmac->desc_pool);
++			spin_unlock(&pch->dmac->pool_lock);
+ 		}
+ 
+ 		dma_descriptor_unmap(&desc->txd);
+@@ -2309,9 +2311,11 @@
+ 		dma_cookie_complete(&desc->txd);
+ 	}
+ 
++	spin_lock(&pl330->pool_lock);
+ 	list_splice_tail_init(&pch->submitted_list, &pl330->desc_pool);
+ 	list_splice_tail_init(&pch->work_list, &pl330->desc_pool);
+ 	list_splice_tail_init(&pch->completed_list, &pl330->desc_pool);
++	spin_unlock(&pl330->pool_lock);
+ 	spin_unlock_irqrestore(&pch->lock, flags);
+ 	pm_runtime_mark_last_busy(pl330->ddma.dev);
+ 	if (power_down)
+@@ -2367,8 +2371,11 @@
+ 	pl330_release_channel(pch->thread);
+ 	pch->thread = NULL;
+ 
+-	if (pch->cyclic)
++	if (pch->cyclic) {
++		spin_lock(&pl330->pool_lock);
+ 		list_splice_tail_init(&pch->work_list, &pch->dmac->desc_pool);
++		spin_unlock(&pl330->pool_lock);
++	}
+ 
+ 	spin_unlock_irqrestore(&pl330->lock, flags);
+ 	pm_runtime_mark_last_busy(pch->dmac->ddma.dev);
