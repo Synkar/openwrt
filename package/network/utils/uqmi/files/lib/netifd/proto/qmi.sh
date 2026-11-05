@@ -114,8 +114,9 @@ proto_qmi_setup() {
 
 	echo "Waiting for SIM initialization"
 	local uninitialized_timeout=0
-	# timeout 3s for first call to avoid hanging uqmi
-	uqmi -d "$device" -t 3000 --get-pin-status > /dev/null 2>&1
+	uqmi -s -d "$device" --get-pin-status &
+	sleep 3
+	killall uqmi || echo "UQMI works fine!"
 	while uqmi -s -d "$device" -t 1000 --get-pin-status | grep '"UIM uninitialized"' > /dev/null; do
 		[ -e "$device" ] || return 1
 		if [ "$uninitialized_timeout" -lt "$timeout" -o "$timeout" = "0" ]; then
