@@ -1,0 +1,39 @@
+From: Synkar <dev@synkar.com>
+Subject: [PATCH] bcmdhd: send a uevent when the firmware hangs
+
+When the dongle firmware hangs (e.g. "AP LINK UP TIMEOUT" while the AP
+moves to the STA channel), dhd_hang_process() closes every interface
+and dhd_stop powers the chip off. The driver then waits for the
+Android framework to restart WiFi; on OpenWrt nobody does, so the
+radio stays off until a manual `wifi up` (the robot falls back to 4G).
+
+Emit KOBJ_CHANGE with BCMDHD_HANG=1 and BCMDHD_HANG_REASON on the
+primary netdev at the end of the hang work, so a hotplug handler
+(/etc/hotplug.d/net) can bring the radio back up.
+
+--- a/dhd_linux.c
++++ b/dhd_linux.c
+@@ -17502,6 +17502,23 @@
+ 	}
+ 	rtnl_unlock();
+ #endif /* IFACE_HANG_FORCE_DEV_CLOSE */
++
++	/*
++	 * Synkar: on Android the framework restarts WiFi after a HANG; on
++	 * OpenWrt nobody does, so the chip stays powered off. Tell userspace
++	 * with a uevent on the primary netdev (SUBSYSTEM=net, ACTION=change,
++	 * BCMDHD_HANG=1) so /etc/hotplug.d/net can bring the radio back up.
++	 */
++	{
++		char reason[32];
++		char *envp[] = { "BCMDHD_HANG=1", reason, NULL };
++
++		snprintf(reason, sizeof(reason), "BCMDHD_HANG_REASON=0x%x",
++			(uint32)dhdp->hang_reason);
++		DHD_ERROR(("%s: %s HANG uevent, reason 0x%x\n", __FUNCTION__,
++			dev->name, (uint32)dhdp->hang_reason));
++		kobject_uevent_env(&dev->dev.kobj, KOBJ_CHANGE, envp);
++	}
+ }
+ 
+ #if defined(CONFIG_ARCH_EXYNOS) && defined(BCMPCIE)
